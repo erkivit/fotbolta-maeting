@@ -1,0 +1,1029 @@
+import React, { useState, useEffect, useCallback, useMemo } from "react";
+import {
+  Check, X, Settings, Users, ShieldCheck, Plus, Trash2, ChevronLeft, ChevronRight,
+  Lock, LockOpen, CalendarDays, Clock, ClipboardList, Ban, Trophy, ListOrdered, Timer, Layers,
+} from "lucide-react";
+import { createClient } from "@supabase/supabase-js";
+
+// Þessi tvö gildi eru örugg í kóðanum (publishable key, ekki secret key).
+const SUPABASE_URL = "https://wpeaeegqyevhswqqiapo.supabase.co";
+const SUPABASE_KEY = "sb_publishable_7FWzFHGH7_Tb0Kzfh4SGtg_rY_1-naY";
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+// Sömu köll og window.storage notaði í Claude artifact-inu, en vistar í Supabase í staðinn.
+const storage = {
+  async get(key) {
+    const { data, error } = await supabase.from("app_data").select("value").eq("key", key).maybeSingle();
+    if (error) throw error;
+    if (!data) return null;
+    return { key, value: JSON.stringify(data.value) };
+  },
+  async set(key, value) {
+    const parsed = JSON.parse(value);
+    const { error } = await supabase.from("app_data").upsert({ key, value: parsed, updated_at: new Date().toISOString() });
+    if (error) throw error;
+    return { key, value };
+  },
+};
+
+const DAYS = ["Sunnudagur", "Mánudagur", "Þriðjudagur", "Miðvikudagur", "Fimmtudagur", "Föstudagur", "Laugardagur"];
+
+const POSITIONS = [
+  { code: "GK", label: "Markvörður" },
+  { code: "DF", label: "Varnarmaður" },
+  { code: "MF", label: "Miðjumaður" },
+  { code: "LM", label: "Vinstri kantmaður" },
+  { code: "RM", label: "Hægri kantmaður" },
+  { code: "ST", label: "Framherji" },
+];
+
+const C = {
+  bgDark: "#0F2E1E",
+  bgDarkBorder: "#2A5A3E",
+  navBg: "#123825",
+  textLight: "#E9E4D4",
+  textMuted: "#7FAE8F",
+  gold: "#D4A94F",
+  cream: "#F5F3EC",
+  ink: "#16211B",
+  inkMuted: "#5C6B60",
+  green: "#1B5E3C",
+  greenLight: "#DDEEE1",
+  tan: "#EAE6DA",
+  tanBorder: "#C9C2AC",
+  divider: "#E3DFD1",
+  rust: "#B4574A",
+  goldBg2: "#F3E6C6",
+  goldText2: "#8A6A22",
+  grayText: "#8A8370",
+  teamABg: "#DDEEE1",
+  teamBBg: "#F3E6C6",
+};
+
+const DEFAULT_SETTINGS = {
+  dayOfWeek: 2,
+  time: "19:30",
+  seasonStart: "2026-09-01",
+  seasonEnd: "2027-05-31",
+  adminPin: "1234",
+  maxParticipants: 16,
+  minParticipants: 8,
+};
+
+function pad(n) { return String(n).padStart(2, "0"); }
+function toISODate(d) { return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; }
+
+function getPracticeDates(settings) {
+  if (!settings.seasonStart || !settings.seasonEnd) return [];
+  const start = new Date(settings.seasonStart + "T00:00:00");
+  const end = new Date(settings.seasonEnd + "T23:59:59");
+  if (isNaN(start) || isNaN(end) || start > end) return [];
+  const dates = [];
+  const d = new Date(start);
+  const diff = (settings.dayOfWeek - d.getDay() + 7) % 7;
+  d.setDate(d.getDate() + diff);
+  let guard = 0;
+  while (d <= end && guard < 500) {
+    dates.push(toISODate(d));
+    d.setDate(d.getDate() + 7);
+    guard++;
+  }
+  return dates;
+}
+
+function practiceDateTime(dateISO, time) {
+  return new Date(`${dateISO}T${time || "00:00"}:00`);
+}
+
+function fmtDateLong(dateISO) {
+  const d = new Date(dateISO + "T00:00:00");
+  return d.toLocaleDateString("is-IS", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+}
+
+function fmtDateShort(dateISO) {
+  const d = new Date(dateISO + "T00:00:00");
+  return d.toLocaleDateString("is-IS", { day: "numeric", month: "short" });
+}
+
+function daysUntil(dateISO, time) {
+  const now = new Date();
+  const target = practiceDateTime(dateISO, time);
+  return (target - now) / (1000 * 60 * 60 * 24);
+}
+
+function formatCountdown(ms) {
+  if (ms <= 0) return null;
+  const totalMin = Math.floor(ms / 60000);
+  const d = Math.floor(totalMin / 1440);
+  const h = Math.floor((totalMin % 1440) / 60);
+  const m = totalMin % 60;
+  const parts = [];
+  if (d > 0) parts.push(`${d}d`);
+  if (h > 0 || d > 0) parts.push(`${h}klst`);
+  parts.push(`${m}mín`);
+  return parts.join(" ");
+}
+
+export default function App() {
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  const [players, setPlayers] = useState([]);
+  const [attendance, setAttendance] = useState({});
+  const [cancelled, setCancelled] = useState({});
+  const [matchStats, setMatchStats] = useState({});
+  const [loaded, setLoaded] = useState(false);
+  const [tab, setTab] = useState("attendance");
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [pinInput, setPinInput] = useState("");
+  const [showPinModal, setShowPinModal] = useState(false);
+  const [selectedIdx, setSelectedIdx] = useState(0);
+  const [newPlayerName, setNewPlayerName] = useState("");
+  const [newPlayerRole, setNewPlayerRole] = useState("main");
+  const [toast, setToast] = useState("");
+  const [positionEditId, setPositionEditId] = useState(null);
+  const [tempPriorities, setTempPriorities] = useState({});
+  const [, forceTick] = useState(0);
+
+  const showToast = useCallback((msg) => {
+    setToast(msg);
+    setTimeout(() => setToast(""), 2200);
+  }, []);
+
+  // re-render every 30s so countdowns stay live
+  useEffect(() => {
+    const t = setInterval(() => forceTick((n) => n + 1), 30000);
+    return () => clearInterval(t);
+  }, []);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const s = await storage.get("settings", true);
+        if (s?.value) setSettings({ ...DEFAULT_SETTINGS, ...JSON.parse(s.value) });
+      } catch (e) {}
+      try {
+        const p = await storage.get("players", true);
+        if (p?.value) setPlayers(JSON.parse(p.value));
+      } catch (e) {}
+      try {
+        const a = await storage.get("attendance", true);
+        if (a?.value) setAttendance(JSON.parse(a.value));
+      } catch (e) {}
+      try {
+        const c = await storage.get("cancelled", true);
+        if (c?.value) setCancelled(JSON.parse(c.value));
+      } catch (e) {}
+      try {
+        const ms = await storage.get("matchStats", true);
+        if (ms?.value) setMatchStats(JSON.parse(ms.value));
+      } catch (e) {}
+      setLoaded(true);
+    })();
+  }, []);
+
+  const saveSettings = useCallback(async (next) => {
+    setSettings(next);
+    try { await storage.set("settings", JSON.stringify(next), true); }
+    catch (e) { showToast("Villa við að vista stillingar"); }
+  }, [showToast]);
+
+  const savePlayers = useCallback(async (next) => {
+    setPlayers(next);
+    try { await storage.set("players", JSON.stringify(next), true); }
+    catch (e) { showToast("Villa við að vista leikmenn"); }
+  }, [showToast]);
+
+  const saveAttendance = useCallback(async (next) => {
+    setAttendance(next);
+    try { await storage.set("attendance", JSON.stringify(next), true); }
+    catch (e) { showToast("Villa við að vista mætingu"); }
+  }, [showToast]);
+
+  const saveCancelled = useCallback(async (next) => {
+    setCancelled(next);
+    try { await storage.set("cancelled", JSON.stringify(next), true); }
+    catch (e) { showToast("Villa við að vista fellda æfingu"); }
+  }, [showToast]);
+
+  const saveMatchStats = useCallback(async (next) => {
+    setMatchStats(next);
+    try { await storage.set("matchStats", JSON.stringify(next), true); }
+    catch (e) { showToast("Villa við að vista úrslit"); }
+  }, [showToast]);
+
+  const practiceDates = useMemo(() => getPracticeDates(settings), [settings]);
+
+  const upcoming = useMemo(() => {
+    const now = new Date();
+    const idx = practiceDates.findIndex((d) => practiceDateTime(d, settings.time) >= now - 1000 * 60 * 60 * 6);
+    const startIdx = idx === -1 ? Math.max(0, practiceDates.length - 1) : idx;
+    return practiceDates.slice(startIdx, startIdx + 10);
+  }, [practiceDates, settings.time]);
+
+  useEffect(() => { setSelectedIdx(0); }, [upcoming.length]);
+
+  const selectedDate = upcoming[selectedIdx];
+  const du = selectedDate ? daysUntil(selectedDate, settings.time) : null;
+
+  const msToClose = selectedDate ? practiceDateTime(selectedDate, settings.time).getTime() - 60 * 60 * 1000 - Date.now() : null;
+  const registrationClosed = msToClose !== null && msToClose <= 0;
+
+  const mainOpen = du !== null && du <= 7 && du > -0.2 && !registrationClosed;
+  const subOpen = du !== null && du <= 1 && du > -0.2 && !registrationClosed;
+
+  function windowLabel(role) {
+    if (du === null) return "";
+    if (registrationClosed) return "Skráning lokuð";
+    const open = role === "main" ? mainOpen : subOpen;
+    if (open) return "Skráning opin";
+    if (role === "main" && du > 7) return `Opnar eftir ${Math.ceil(du - 7)} daga`;
+    if (role === "sub" && du > 1) return `Opnar eftir ${Math.ceil(du - 1)} daga`;
+    return "Skráning lokuð";
+  }
+
+  function canMark(role) {
+    if (isAdmin) return true;
+    return role === "main" ? mainOpen : subOpen;
+  }
+
+  function setMark(playerId, value) {
+    const next = { ...attendance };
+    if (!next[selectedDate]) next[selectedDate] = {};
+    const current = next[selectedDate][playerId];
+    if (value === "yes" && current !== "yes" && !isAdmin) {
+      const yesCount = players.filter((p) => next[selectedDate][p.id] === "yes").length;
+      if (yesCount >= (settings.maxParticipants || 0)) {
+        showToast("Æfingin er fullbókuð");
+        return;
+      }
+    }
+    next[selectedDate] = { ...next[selectedDate], [playerId]: value };
+    saveAttendance(next);
+  }
+
+  const isCancelled = !!(selectedDate && cancelled[selectedDate]);
+
+  function toggleCancelled() {
+    const next = { ...cancelled };
+    if (next[selectedDate]) {
+      delete next[selectedDate];
+      showToast("Æfing endurvakin");
+    } else {
+      next[selectedDate] = true;
+      showToast("Æfing felld niður");
+    }
+    saveCancelled(next);
+  }
+
+  function tryUnlock() {
+    if (pinInput === settings.adminPin) {
+      setIsAdmin(true);
+      setShowPinModal(false);
+      setPinInput("");
+      showToast("Þjálfaraaðgangur opinn");
+    } else {
+      showToast("Rangt PIN-númer");
+    }
+  }
+
+  function addPlayer() {
+    const name = newPlayerName.trim();
+    if (!name) return;
+    const id = `p_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    savePlayers([...players, { id, name, role: newPlayerRole, positionPriority: {} }]);
+    setNewPlayerName("");
+    showToast(`${name} bætt við`);
+  }
+
+  function removePlayer(id) {
+    savePlayers(players.filter((p) => p.id !== id));
+  }
+
+  function toggleRole(id) {
+    savePlayers(players.map((p) => (p.id === id ? { ...p, role: p.role === "main" ? "sub" : "main" } : p)));
+  }
+
+  function openPositionEditor(p) {
+    setPositionEditId(p.id);
+    setTempPriorities({ ...(p.positionPriority || {}) });
+  }
+
+  function changeTempPriority(code, val) {
+    setTempPriorities((prev) => {
+      const next = { ...prev };
+      if (val === "") delete next[code];
+      else next[code] = Number(val);
+      return next;
+    });
+  }
+
+  function savePositionEditor() {
+    savePlayers(players.map((p) => (p.id === positionEditId ? { ...p, positionPriority: tempPriorities } : p)));
+    setPositionEditId(null);
+    showToast("Stöður vistaðar");
+  }
+
+  function setMatchStat(playerId, field, value) {
+    const num = Math.max(0, parseInt(value, 10) || 0);
+    const next = { ...matchStats };
+    if (!next[selectedDate]) next[selectedDate] = {};
+    const row = next[selectedDate][playerId] || { goals: 0, wins: 0 };
+    next[selectedDate] = { ...next[selectedDate], [playerId]: { ...row, [field]: num } };
+    saveMatchStats(next);
+  }
+
+  function attendanceCount(playerId) {
+    return Object.values(attendance).filter((day) => day && day[playerId] === "yes").length;
+  }
+  function totalGoals(playerId) {
+    return Object.values(matchStats).reduce((sum, day) => sum + ((day && day[playerId] && day[playerId].goals) || 0), 0);
+  }
+  function totalWins(playerId) {
+    return Object.values(matchStats).reduce((sum, day) => sum + ((day && day[playerId] && day[playerId].wins) || 0), 0);
+  }
+
+  function computeTeams(dateISO) {
+    const confirmed = players.filter((p) => attendance[dateISO] && attendance[dateISO][p.id] === "yes");
+    if (confirmed.length === 0) return null;
+
+    const withScore = confirmed.map((p) => ({
+      ...p,
+      score: totalGoals(p.id) + totalWins(p.id),
+      att: attendanceCount(p.id),
+    }));
+    withScore.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name, "is"));
+
+    const teamA = [];
+    const teamB = [];
+    withScore.forEach((p, i) => {
+      const rank = i + 1; // 1-indexed
+      (rank % 2 === 1 ? teamA : teamB).push(p);
+    });
+
+    function assignPositions(team) {
+      const ordered = [...team].sort((a, b) => b.att - a.att || a.name.localeCompare(b.name, "is"));
+      const capacity = { GK: 1, DF: 3, MF: 2, LM: 1, RM: 1, ST: 1 };
+      const counts = { GK: 0, DF: 0, MF: 0, LM: 0, RM: 0, ST: 0 };
+
+      const result = ordered.map((p) => {
+        const prefs = POSITIONS.map((pos) => pos.code)
+          .slice()
+          .sort((a, b) => {
+            const pa = (p.positionPriority && p.positionPriority[a]) ?? 6;
+            const pb = (p.positionPriority && p.positionPriority[b]) ?? 6;
+            return pa - pb;
+          });
+        let chosen = prefs.find((code) => counts[code] < capacity[code]);
+        if (!chosen) {
+          chosen = Object.keys(counts).sort((a, b) => counts[a] - counts[b])[0];
+        }
+        counts[chosen] += 1;
+        return { id: p.id, name: p.name, position: chosen };
+      });
+      return result;
+    }
+
+    return { teamA: assignPositions(teamA), teamB: assignPositions(teamB) };
+  }
+
+  const mainPlayers = players.filter((p) => p.role === "main");
+  const subPlayers = players.filter((p) => p.role === "sub");
+
+  const dayAttendance = attendance[selectedDate] || {};
+  const comingCount = players.filter((p) => dayAttendance[p.id] === "yes").length;
+  const maxReached = comingCount >= (settings.maxParticipants || 0);
+  const confirmedPlayers = players.filter((p) => dayAttendance[p.id] === "yes");
+  const notEnoughPlayers = registrationClosed && !isCancelled && confirmedPlayers.length < (settings.minParticipants || 0);
+  const teams = registrationClosed && !isCancelled && !notEnoughPlayers ? computeTeams(selectedDate) : null;
+
+  const inputStyle = {
+    width: "100%",
+    border: `1px solid ${C.tanBorder}`,
+    borderRadius: "0.5rem",
+    padding: "0.5rem 0.75rem",
+    fontSize: "0.875rem",
+    background: "white",
+    color: C.ink,
+  };
+  const labelStyle = { display: "block", fontSize: "0.75rem", color: C.inkMuted, marginBottom: "0.25rem" };
+  const cardStyle = { background: C.cream, borderRadius: "1rem" };
+
+  if (!loaded) {
+    return (
+      <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: C.bgDark, color: C.textLight }}>
+        <div style={{ fontSize: "0.875rem", letterSpacing: "0.2em", textTransform: "uppercase" }}>Hleð...</div>
+      </div>
+    );
+  }
+
+  const tabs = [
+    { id: "attendance", label: "Æfingar", icon: ClipboardList },
+    { id: "positions", label: "Stöður", icon: ListOrdered },
+    { id: "stats", label: "Tölfræði", icon: Trophy },
+    ...(isAdmin ? [{ id: "players", label: "Leikmenn", icon: Users }, { id: "settings", label: "Stillingar", icon: Settings }] : []),
+  ];
+
+  return (
+    <div style={{ minHeight: "100vh", background: C.bgDark, color: C.ink, fontFamily: "'Inter', system-ui, sans-serif" }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap');
+        .display-font { font-family: 'Oswald', 'Arial Narrow', sans-serif; letter-spacing: 0.02em; }
+        .pitch-lines {
+          background-image: repeating-linear-gradient(0deg, rgba(245,243,236,0.05) 0px, rgba(245,243,236,0.05) 1px, transparent 1px, transparent 64px),
+                             repeating-linear-gradient(90deg, rgba(245,243,236,0.05) 0px, rgba(245,243,236,0.05) 1px, transparent 1px, transparent 64px);
+        }
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+      `}</style>
+
+      {/* Header */}
+      <div className="pitch-lines" style={{ borderBottom: `1px solid ${C.bgDarkBorder}`, padding: "1.5rem 1.25rem 1rem" }}>
+        <div style={{ maxWidth: 448, margin: "0 auto", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div>
+            <div className="display-font" style={{ color: C.textLight, fontSize: "1.25rem", fontWeight: 600, textTransform: "uppercase", lineHeight: 1 }}>Mæting</div>
+            <div style={{ color: C.textMuted, fontSize: "0.75rem", marginTop: "0.25rem" }}>Fótboltahópurinn</div>
+          </div>
+          <button
+            onClick={() => (isAdmin ? setIsAdmin(false) : setShowPinModal(true))}
+            style={{
+              display: "flex", alignItems: "center", gap: "0.375rem", padding: "0.375rem 0.75rem",
+              borderRadius: "9999px", fontSize: "0.75rem", fontWeight: 500,
+              background: isAdmin ? C.gold : "transparent",
+              color: isAdmin ? C.ink : C.textLight,
+              border: `1px solid ${isAdmin ? C.gold : "#3E6B4E"}`,
+            }}
+          >
+            {isAdmin ? <LockOpen size={13} /> : <Lock size={13} />}
+            {isAdmin ? "Þjálfari" : "Læst"}
+          </button>
+        </div>
+      </div>
+
+      {toast && (
+        <div style={{
+          position: "fixed", top: "1rem", left: "50%", transform: "translateX(-50%)", zIndex: 50,
+          background: C.ink, color: C.textLight, fontSize: "0.875rem", padding: "0.5rem 1rem",
+          borderRadius: "9999px", boxShadow: "0 10px 25px rgba(0,0,0,0.3)",
+        }}>
+          {toast}
+        </div>
+      )}
+
+      {showPinModal && (
+        <div
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: "0 1.5rem" }}
+          onClick={() => setShowPinModal(false)}
+        >
+          <div style={{ ...cardStyle, padding: "1.25rem", width: "100%", maxWidth: 320 }} onClick={(e) => e.stopPropagation()}>
+            <div className="display-font" style={{ color: C.ink, fontWeight: 600, textTransform: "uppercase", marginBottom: "0.25rem" }}>Þjálfaraaðgangur</div>
+            <p style={{ fontSize: "0.75rem", color: C.inkMuted, marginBottom: "0.75rem" }}>Sláðu inn PIN-númer til að opna stillingar og leikmannalista.</p>
+            <input
+              autoFocus
+              type="password"
+              inputMode="numeric"
+              value={pinInput}
+              onChange={(e) => setPinInput(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && tryUnlock()}
+              placeholder="PIN"
+              style={{ ...inputStyle, textAlign: "center", letterSpacing: "0.3em", marginBottom: "0.75rem" }}
+            />
+            <div style={{ display: "flex", gap: "0.5rem" }}>
+              <button onClick={() => setShowPinModal(false)} style={{ flex: 1, padding: "0.5rem", borderRadius: "0.5rem", fontSize: "0.875rem", color: C.inkMuted, background: C.tan, border: "none" }}>Hætta við</button>
+              <button onClick={tryUnlock} style={{ flex: 1, padding: "0.5rem", borderRadius: "0.5rem", fontSize: "0.875rem", color: "white", background: C.green, border: "none" }}>Opna</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {positionEditId && (() => {
+        const p = players.find((pl) => pl.id === positionEditId);
+        if (!p) return null;
+        return (
+          <div
+            style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: "0 1.5rem" }}
+            onClick={() => setPositionEditId(null)}
+          >
+            <div style={{ ...cardStyle, padding: "1.25rem", width: "100%", maxWidth: 340 }} onClick={(e) => e.stopPropagation()}>
+              <div className="display-font" style={{ color: C.ink, fontWeight: 600, textTransform: "uppercase", marginBottom: "0.25rem" }}>{p.name} — stöður</div>
+              <p style={{ fontSize: "0.75rem", color: C.inkMuted, marginBottom: "0.75rem" }}>1 = fyrsti kostur. Ekkert val = lægsti forgangur.</p>
+              <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", marginBottom: "1rem" }}>
+                {POSITIONS.map((pos) => (
+                  <div key={pos.code} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.5rem" }}>
+                    <span style={{ fontSize: "0.8125rem", color: C.ink }}>{pos.code} · {pos.label}</span>
+                    <select
+                      value={tempPriorities[pos.code] ?? ""}
+                      onChange={(e) => changeTempPriority(pos.code, e.target.value)}
+                      style={{ border: `1px solid ${C.tanBorder}`, borderRadius: "0.375rem", padding: "0.25rem 0.5rem", fontSize: "0.8125rem", background: "white", color: C.ink }}
+                    >
+                      <option value="">–</option>
+                      {[1, 2, 3, 4, 5, 6].map((n) => <option key={n} value={n}>{n}</option>)}
+                    </select>
+                  </div>
+                ))}
+              </div>
+              <div style={{ display: "flex", gap: "0.5rem" }}>
+                <button onClick={() => setPositionEditId(null)} style={{ flex: 1, padding: "0.5rem", borderRadius: "0.5rem", fontSize: "0.875rem", color: C.inkMuted, background: C.tan, border: "none" }}>Hætta við</button>
+                <button onClick={savePositionEditor} style={{ flex: 1, padding: "0.5rem", borderRadius: "0.5rem", fontSize: "0.875rem", color: "white", background: C.green, border: "none" }}>Vista</button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      <div style={{ maxWidth: 448, margin: "0 auto", padding: "0 1rem 6rem" }}>
+        <div className="no-scrollbar" style={{ display: "flex", flexWrap: "wrap", gap: "0.375rem", marginTop: "1rem", marginBottom: "1rem", background: C.navBg, borderRadius: "1rem", padding: "0.375rem" }}>
+          {tabs.map((t) => (
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              style={{
+                flex: "0 0 auto", display: "flex", alignItems: "center", justifyContent: "center", gap: "0.375rem",
+                padding: "0.5rem 0.75rem", borderRadius: "9999px", fontSize: "0.75rem", fontWeight: 500, border: "none", whiteSpace: "nowrap",
+                background: tab === t.id ? C.textLight : "transparent",
+                color: tab === t.id ? C.ink : C.textMuted,
+              }}
+            >
+              <t.icon size={13} />
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        {tab === "attendance" && (
+          <>
+            {upcoming.length === 0 ? (
+              <div style={{ ...cardStyle, padding: "1.5rem", textAlign: "center", color: C.inkMuted, fontSize: "0.875rem", marginTop: "1.5rem" }}>
+                Engar æfingar á skráðu tímabili. Farðu í Stillingar og settu upp æfingatíma.
+              </div>
+            ) : (
+              <>
+                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.75rem" }}>
+                  <button
+                    disabled={selectedIdx === 0}
+                    onClick={() => setSelectedIdx((i) => Math.max(0, i - 1))}
+                    style={{ padding: "0.375rem", borderRadius: "9999px", background: C.navBg, color: C.textLight, border: "none", opacity: selectedIdx === 0 ? 0.3 : 1 }}
+                  >
+                    <ChevronLeft size={16} />
+                  </button>
+                  <div className="no-scrollbar" style={{ flex: 1, display: "flex", gap: "0.375rem", overflowX: "auto" }}>
+                    {upcoming.map((d, i) => (
+                      <button
+                        key={d}
+                        onClick={() => setSelectedIdx(i)}
+                        style={{
+                          flexShrink: 0, padding: "0.375rem 0.75rem", borderRadius: "9999px", fontSize: "0.75rem",
+                          fontWeight: 500, border: "none",
+                          textDecoration: cancelled[d] ? "line-through" : "none",
+                          background: i === selectedIdx ? C.gold : C.navBg,
+                          color: i === selectedIdx ? C.ink : (cancelled[d] ? "#4E7A5E" : C.textMuted),
+                        }}
+                      >
+                        {fmtDateShort(d)}
+                      </button>
+                    ))}
+                  </div>
+                  <button
+                    disabled={selectedIdx === upcoming.length - 1}
+                    onClick={() => setSelectedIdx((i) => Math.min(upcoming.length - 1, i + 1))}
+                    style={{ padding: "0.375rem", borderRadius: "9999px", background: C.navBg, color: C.textLight, border: "none", opacity: selectedIdx === upcoming.length - 1 ? 0.3 : 1 }}
+                  >
+                    <ChevronRight size={16} />
+                  </button>
+                </div>
+
+                <div style={{ ...cardStyle, overflow: "hidden", boxShadow: "0 10px 25px rgba(0,0,0,0.25)" }}>
+                  <div style={{ padding: "1rem 1.25rem 0.75rem", borderBottom: `1px dashed ${C.tanBorder}` }}>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "0.25rem" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: "0.375rem", color: C.inkMuted, fontSize: "0.75rem" }}>
+                        <CalendarDays size={13} />
+                        <span style={{ textTransform: "capitalize" }}>{fmtDateLong(selectedDate)}</span>
+                      </div>
+                      {isAdmin && (
+                        <button
+                          onClick={toggleCancelled}
+                          style={{
+                            display: "flex", alignItems: "center", gap: "0.25rem", fontSize: "0.6875rem", fontWeight: 500,
+                            padding: "0.25rem 0.5rem", borderRadius: "9999px", border: "none",
+                            background: isCancelled ? C.greenLight : "#F5DCD5",
+                            color: isCancelled ? C.green : C.rust,
+                          }}
+                        >
+                          <Ban size={12} />
+                          {isCancelled ? "Endurvekja æfingu" : "Fella niður æfingu"}
+                        </button>
+                      )}
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.375rem", color: C.inkMuted, fontSize: "0.75rem", marginBottom: "0.5rem" }}>
+                      <Clock size={13} />
+                      <span>{settings.time}</span>
+                    </div>
+                    {!isCancelled && (
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "0.375rem" }}>
+                        <div className="display-font" style={{ fontSize: "1.125rem", fontWeight: 600, color: C.ink }}>
+                          {comingCount} af {settings.maxParticipants} skráðir
+                        </div>
+                        {notEnoughPlayers ? (
+                          <div style={{ display: "flex", alignItems: "center", gap: "0.25rem", fontSize: "0.75rem", fontWeight: 500, color: C.rust, background: "#F5DCD5", padding: "0.25rem 0.625rem", borderRadius: "9999px" }}>
+                            <Ban size={11} /> Ekki nóg skráð
+                          </div>
+                        ) : registrationClosed ? (
+                          <div style={{ display: "flex", alignItems: "center", gap: "0.25rem", fontSize: "0.75rem", fontWeight: 500, color: C.inkMuted, background: C.tan, padding: "0.25rem 0.625rem", borderRadius: "9999px" }}>
+                            <Lock size={11} /> Skráningu lokað
+                          </div>
+                        ) : maxReached ? (
+                          <div style={{ fontSize: "0.75rem", fontWeight: 500, color: C.rust, background: "#F5DCD5", padding: "0.25rem 0.625rem", borderRadius: "9999px" }}>
+                            Fullbókað
+                          </div>
+                        ) : msToClose !== null ? (
+                          <div style={{ display: "flex", alignItems: "center", gap: "0.25rem", fontSize: "0.75rem", fontWeight: 500, color: C.green, background: C.greenLight, padding: "0.25rem 0.625rem", borderRadius: "9999px" }}>
+                            <Timer size={11} /> Lokar eftir {formatCountdown(msToClose)}
+                          </div>
+                        ) : null}
+                      </div>
+                    )}
+                  </div>
+
+                  {isCancelled ? (
+                    <div style={{ padding: "1.5rem 1.25rem", textAlign: "center" }}>
+                      <div style={{ display: "inline-flex", alignItems: "center", gap: "0.375rem", color: C.rust, fontWeight: 600, fontSize: "0.875rem", marginBottom: "0.25rem" }}>
+                        <Ban size={16} />
+                        Æfing felld niður
+                      </div>
+                      <p style={{ fontSize: "0.75rem", color: C.inkMuted }}>Engin skráning fer fram fyrir þessa æfingu.</p>
+                    </div>
+                  ) : notEnoughPlayers ? (
+                    <div style={{ padding: "1.5rem 1.25rem", textAlign: "center" }}>
+                      <div style={{ display: "inline-flex", alignItems: "center", gap: "0.375rem", color: C.rust, fontWeight: 600, fontSize: "0.875rem", marginBottom: "0.25rem" }}>
+                        <Ban size={16} />
+                        Æfing féll niður
+                      </div>
+                      <p style={{ fontSize: "0.75rem", color: C.inkMuted }}>
+                        Aðeins {confirmedPlayers.length} af lágmarki {settings.minParticipants} skráðir. Þeir sem skráðu sig fá samt mætingarstig.
+                      </p>
+                    </div>
+                  ) : (
+                    <>
+                      <RosterSection
+                        title="Aðalmenn"
+                        subtitle={windowLabel("main")}
+                        open={mainOpen || isAdmin}
+                        players={mainPlayers}
+                        dayAttendance={dayAttendance}
+                        isAdmin={isAdmin}
+                        canMark={canMark("main")}
+                        maxReached={maxReached}
+                        onMark={setMark}
+                      />
+                      <RosterSection
+                        title="Varamenn"
+                        subtitle={windowLabel("sub")}
+                        open={subOpen || isAdmin}
+                        players={subPlayers}
+                        dayAttendance={dayAttendance}
+                        isAdmin={isAdmin}
+                        canMark={canMark("sub")}
+                        maxReached={maxReached}
+                        onMark={setMark}
+                        isLast={!registrationClosed}
+                      />
+
+                      {registrationClosed && (
+                        <div style={{ padding: "1rem 1.25rem", borderTop: `1px dashed ${C.tanBorder}` }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: "0.375rem", fontSize: "0.75rem", fontWeight: 600, textTransform: "uppercase", color: C.ink, marginBottom: "0.5rem" }}>
+                            <Trophy size={13} />
+                            Skrá úrslit æfingar
+                          </div>
+                          {confirmedPlayers.length === 0 ? (
+                            <p style={{ fontSize: "0.75rem", color: C.grayText }}>Enginn skráður sem mætti.</p>
+                          ) : (
+                            <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+                              {confirmedPlayers.map((p) => {
+                                const row = (matchStats[selectedDate] && matchStats[selectedDate][p.id]) || { goals: 0, wins: 0 };
+                                return (
+                                  <div key={p.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "0.5rem" }}>
+                                    <span style={{ fontSize: "0.8125rem", color: C.ink, flex: 1 }}>{p.name}</span>
+                                    <div style={{ display: "flex", alignItems: "center", gap: "0.25rem" }}>
+                                      <span style={{ fontSize: "0.625rem", color: C.inkMuted }}>Mörk</span>
+                                      <input
+                                        type="number" min="0" value={row.goals}
+                                        onChange={(e) => setMatchStat(p.id, "goals", e.target.value)}
+                                        style={{ width: "3rem", border: `1px solid ${C.tanBorder}`, borderRadius: "0.375rem", padding: "0.25rem", fontSize: "0.8125rem", textAlign: "center" }}
+                                      />
+                                    </div>
+                                    <div style={{ display: "flex", alignItems: "center", gap: "0.25rem" }}>
+                                      <span style={{ fontSize: "0.625rem", color: C.inkMuted }}>Sigrar</span>
+                                      <input
+                                        type="number" min="0" value={row.wins}
+                                        onChange={(e) => setMatchStat(p.id, "wins", e.target.value)}
+                                        style={{ width: "3rem", border: `1px solid ${C.tanBorder}`, borderRadius: "0.375rem", padding: "0.25rem", fontSize: "0.8125rem", textAlign: "center" }}
+                                      />
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+
+                {!isAdmin && !isCancelled && !registrationClosed && (
+                  <p style={{ textAlign: "center", fontSize: "0.625rem", color: C.textMuted, marginTop: "0.75rem", padding: "0 1rem" }}>
+                    Aðalmenn skrá sig viku fyrir æfingu · Varamenn sólarhring fyrir æfingu · Skráningu lokar klukkutíma fyrir æfingu
+                  </p>
+                )}
+
+                {teams && (
+                  <div style={{ marginTop: "1rem" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.375rem", color: C.textLight, fontSize: "0.8125rem", fontWeight: 600, textTransform: "uppercase", marginBottom: "0.5rem" }}>
+                      <Layers size={14} /> Liðaskipting
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem" }}>
+                      <TeamCard title="Lið A" bg={C.teamABg} team={teams.teamA} />
+                      <TeamCard title="Lið B" bg={C.teamBBg} team={teams.teamB} />
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </>
+        )}
+
+        {tab === "positions" && (
+          <div style={{ marginTop: "0.5rem" }}>
+            <div style={{ ...cardStyle, overflow: "hidden" }}>
+              <div style={{ padding: "1rem 1rem 0.5rem" }}>
+                <div className="display-font" style={{ fontSize: "0.875rem", fontWeight: 600, textTransform: "uppercase", color: C.ink }}>Valdar stöður</div>
+                <p style={{ fontSize: "0.75rem", color: C.inkMuted, marginTop: "0.25rem" }}>Veldu allt að 6 stöður og raðaðu eftir því sem þú vilt helst spila. 1 = fyrsti kostur.</p>
+              </div>
+              {players.length === 0 && (
+                <div style={{ padding: "0 1rem 1rem", fontSize: "0.875rem", color: C.inkMuted }}>Enginn leikmaður skráður ennþá.</div>
+              )}
+              {players.map((p, i) => (
+                <button
+                  key={p.id}
+                  onClick={() => openPositionEditor(p)}
+                  style={{
+                    width: "100%", textAlign: "left", display: "flex", alignItems: "center", justifyContent: "space-between",
+                    padding: "0.75rem 1rem", borderBottom: i !== players.length - 1 ? `1px solid ${C.divider}` : "none",
+                    background: "transparent", border: "none",
+                  }}
+                >
+                  <span style={{ fontSize: "0.875rem", color: C.ink }}>{p.name}</span>
+                  <span style={{ fontSize: "0.6875rem", color: C.inkMuted, textAlign: "right", maxWidth: "60%" }}>
+                    {Object.keys(p.positionPriority || {}).length
+                      ? Object.entries(p.positionPriority).sort((a, b) => a[1] - b[1]).map(([code, pri]) => `${pri}.${code}`).join("  ")
+                      : "Engar stöður valdar"}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {tab === "stats" && (
+          <div style={{ marginTop: "0.5rem" }}>
+            <div style={{ ...cardStyle, overflow: "hidden" }}>
+              <div style={{ display: "grid", gridTemplateColumns: "1.6fr 0.8fr 0.8fr 0.8fr", padding: "0.75rem 1rem", background: C.tan, fontSize: "0.6875rem", fontWeight: 600, textTransform: "uppercase", color: C.inkMuted }}>
+                <span>Nafn</span><span style={{ textAlign: "center" }}>Mæt.</span><span style={{ textAlign: "center" }}>Mörk</span><span style={{ textAlign: "center" }}>Sigrar</span>
+              </div>
+              {[...players].sort((a, b) => attendanceCount(b.id) - attendanceCount(a.id)).map((p, i) => (
+                <div key={p.id} style={{ display: "grid", gridTemplateColumns: "1.6fr 0.8fr 0.8fr 0.8fr", padding: "0.625rem 1rem", borderBottom: i !== players.length - 1 ? `1px solid ${C.divider}` : "none", alignItems: "center" }}>
+                  <span style={{ fontSize: "0.8125rem", color: C.ink }}>{p.name}</span>
+                  <span style={{ fontSize: "0.8125rem", color: C.ink, textAlign: "center" }}>{attendanceCount(p.id)}</span>
+                  <span style={{ fontSize: "0.8125rem", color: C.ink, textAlign: "center" }}>{totalGoals(p.id)}</span>
+                  <span style={{ fontSize: "0.8125rem", color: C.ink, textAlign: "center" }}>{totalWins(p.id)}</span>
+                </div>
+              ))}
+              {players.length === 0 && (
+                <div style={{ padding: "1rem", fontSize: "0.875rem", color: C.inkMuted }}>Engin tölfræði ennþá.</div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {tab === "players" && isAdmin && (
+          <div style={{ marginTop: "0.5rem" }}>
+            <div style={{ ...cardStyle, padding: "1rem", marginBottom: "1rem" }}>
+              <div className="display-font" style={{ fontSize: "0.875rem", fontWeight: 600, textTransform: "uppercase", color: C.ink, marginBottom: "0.75rem" }}>Bæta við leikmanni</div>
+              <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.5rem" }}>
+                <input
+                  value={newPlayerName}
+                  onChange={(e) => setNewPlayerName(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && addPlayer()}
+                  placeholder="Nafn leikmanns"
+                  style={{ ...inputStyle, flex: 1 }}
+                />
+                <button onClick={addPlayer} style={{ background: C.green, color: "white", borderRadius: "0.5rem", padding: "0.5rem 0.75rem", border: "none" }}>
+                  <Plus size={16} />
+                </button>
+              </div>
+              <div style={{ display: "flex", gap: "0.5rem" }}>
+                {["main", "sub"].map((r) => (
+                  <button
+                    key={r}
+                    onClick={() => setNewPlayerRole(r)}
+                    style={{
+                      flex: 1, fontSize: "0.75rem", padding: "0.375rem", borderRadius: "0.5rem", fontWeight: 500, border: "none",
+                      background: newPlayerRole === r ? C.gold : C.tan,
+                      color: newPlayerRole === r ? C.ink : C.inkMuted,
+                    }}
+                  >
+                    {r === "main" ? "Aðalmaður" : "Varamaður"}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ ...cardStyle, overflow: "hidden" }}>
+              <div className="display-font" style={{ padding: "0.75rem 1rem 0.5rem", fontSize: "0.875rem", fontWeight: 600, textTransform: "uppercase", color: C.ink }}>
+                Leikmenn ({players.length})
+              </div>
+              {players.length === 0 && (
+                <div style={{ padding: "0 1rem 1rem", fontSize: "0.875rem", color: C.inkMuted }}>Enginn leikmaður skráður ennþá.</div>
+              )}
+              {players.map((p, i) => (
+                <div key={p.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0.625rem 1rem", borderBottom: i !== players.length - 1 ? `1px solid ${C.divider}` : "none" }}>
+                  <span style={{ fontSize: "0.875rem", color: C.ink }}>{p.name}</span>
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                    <button
+                      onClick={() => toggleRole(p.id)}
+                      style={{
+                        fontSize: "0.625rem", fontWeight: 500, padding: "0.25rem 0.5rem", borderRadius: "9999px", border: "none",
+                        background: p.role === "main" ? C.greenLight : C.goldBg2,
+                        color: p.role === "main" ? C.green : C.goldText2,
+                      }}
+                    >
+                      {p.role === "main" ? "Aðalmaður" : "Varamaður"}
+                    </button>
+                    <button onClick={() => removePlayer(p.id)} style={{ color: C.rust, padding: "0.25rem", background: "transparent", border: "none" }}>
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {tab === "settings" && isAdmin && (
+          <div style={{ marginTop: "0.5rem", display: "flex", flexDirection: "column", gap: "1rem" }}>
+            <div style={cardStyle}>
+              <div style={{ padding: "1rem" }}>
+                <div className="display-font" style={{ fontSize: "0.875rem", fontWeight: 600, textTransform: "uppercase", color: C.ink, marginBottom: "0.75rem" }}>Æfingatími</div>
+                <label style={labelStyle}>Vikudagur</label>
+                <select
+                  value={settings.dayOfWeek}
+                  onChange={(e) => saveSettings({ ...settings, dayOfWeek: Number(e.target.value) })}
+                  style={{ ...inputStyle, marginBottom: "0.75rem" }}
+                >
+                  {DAYS.map((d, i) => <option key={i} value={i}>{d}</option>)}
+                </select>
+                <label style={labelStyle}>Tímasetning</label>
+                <input
+                  type="time"
+                  value={settings.time}
+                  onChange={(e) => saveSettings({ ...settings, time: e.target.value })}
+                  style={inputStyle}
+                />
+              </div>
+            </div>
+
+            <div style={cardStyle}>
+              <div style={{ padding: "1rem" }}>
+                <div className="display-font" style={{ fontSize: "0.875rem", fontWeight: 600, textTransform: "uppercase", color: C.ink, marginBottom: "0.75rem" }}>Tímabil</div>
+                <label style={labelStyle}>Byrjar</label>
+                <input
+                  type="date"
+                  value={settings.seasonStart}
+                  onChange={(e) => saveSettings({ ...settings, seasonStart: e.target.value })}
+                  style={{ ...inputStyle, marginBottom: "0.75rem" }}
+                />
+                <label style={labelStyle}>Endar</label>
+                <input
+                  type="date"
+                  value={settings.seasonEnd}
+                  onChange={(e) => saveSettings({ ...settings, seasonEnd: e.target.value })}
+                  style={inputStyle}
+                />
+                <p style={{ fontSize: "0.6875rem", color: C.textMuted, marginTop: "0.5rem" }}>{practiceDates.length} æfingar á tímabilinu</p>
+              </div>
+            </div>
+
+            <div style={cardStyle}>
+              <div style={{ padding: "1rem" }}>
+                <div className="display-font" style={{ fontSize: "0.875rem", fontWeight: 600, textTransform: "uppercase", color: C.ink, marginBottom: "0.75rem" }}>Lágmarks- og hámarksþátttaka</div>
+                <label style={labelStyle}>Lágmarksfjöldi svo æfing verði</label>
+                <input
+                  type="number"
+                  min="1"
+                  value={settings.minParticipants}
+                  onChange={(e) => saveSettings({ ...settings, minParticipants: Math.max(1, Number(e.target.value) || 1) })}
+                  style={{ ...inputStyle, marginBottom: "0.75rem" }}
+                />
+                <label style={labelStyle}>Fjöldi sem kemst að á hverja æfingu (hámark)</label>
+                <input
+                  type="number"
+                  min="1"
+                  value={settings.maxParticipants}
+                  onChange={(e) => saveSettings({ ...settings, maxParticipants: Math.max(1, Number(e.target.value) || 1) })}
+                  style={inputStyle}
+                />
+                <p style={{ fontSize: "0.6875rem", color: C.inkMuted, marginTop: "0.5rem" }}>Ef færri en lágmarksfjöldi skrá sig fellur æfingin niður sjálfkrafa við lokun skráningar, en þeir sem skráðu sig halda mætingarstiginu sínu. Þjálfari getur alltaf skráð fram yfir hámarkið.</p>
+              </div>
+            </div>
+
+            <div style={cardStyle}>
+              <div style={{ padding: "1rem" }}>
+                <div className="display-font" style={{ fontSize: "0.875rem", fontWeight: 600, textTransform: "uppercase", color: C.ink, marginBottom: "0.75rem" }}>PIN-númer þjálfara</div>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  value={settings.adminPin}
+                  onChange={(e) => saveSettings({ ...settings, adminPin: e.target.value })}
+                  style={inputStyle}
+                />
+                <p style={{ fontSize: "0.6875rem", color: C.inkMuted, marginTop: "0.5rem" }}>Notað til að opna þjálfaraaðgang á þessu tæki.</p>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TeamCard({ title, bg, team }) {
+  return (
+    <div style={{ background: bg, borderRadius: "0.875rem", padding: "0.75rem", minHeight: 120 }}>
+      <div className="display-font" style={{ fontSize: "0.8125rem", fontWeight: 700, textTransform: "uppercase", color: "#16211B", marginBottom: "0.5rem" }}>{title}</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
+        {team.map((p) => (
+          <div key={p.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <span style={{ fontSize: "0.75rem", color: "#16211B" }}>{p.name}</span>
+            <span style={{ fontSize: "0.625rem", fontWeight: 700, color: "#16211B", background: "rgba(255,255,255,0.55)", padding: "0.1rem 0.4rem", borderRadius: "0.25rem" }}>{p.position}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function RosterSection({ title, subtitle, open, players, dayAttendance, isAdmin, canMark, maxReached, onMark, isLast }) {
+  return (
+    <div style={{ padding: "0.75rem 1.25rem", borderBottom: !isLast ? `1px dashed ${C.tanBorder}` : "none" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "0.5rem" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.375rem", fontSize: "0.75rem", fontWeight: 600, textTransform: "uppercase", color: C.ink }}>
+          <ShieldCheck size={13} color={open ? C.green : "#B4A98A"} />
+          {title}
+        </div>
+        <span style={{
+          fontSize: "0.625rem", fontWeight: 500, padding: "0.125rem 0.5rem", borderRadius: "9999px",
+          background: open ? C.greenLight : C.tan,
+          color: open ? C.green : C.grayText,
+        }}>
+          {subtitle}
+        </span>
+      </div>
+      {players.length === 0 && <div style={{ fontSize: "0.75rem", color: C.grayText, padding: "0.25rem 0" }}>Enginn skráður í þennan hóp</div>}
+      <div style={{ display: "flex", flexDirection: "column", gap: "0.375rem" }}>
+        {players.map((p) => {
+          const val = dayAttendance[p.id];
+          const editable = isAdmin || canMark;
+          const yesBlocked = !isAdmin && maxReached && val !== "yes";
+          return (
+            <div key={p.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <span style={{ fontSize: "0.875rem", color: "#3D473F" }}>{p.name}</span>
+              <div style={{ display: "flex", gap: "0.25rem" }}>
+                <button
+                  disabled={!editable || yesBlocked}
+                  onClick={() => onMark(p.id, "yes")}
+                  style={{
+                    padding: "0.375rem", borderRadius: "0.5rem", border: "none", opacity: (editable && !yesBlocked) ? 1 : 0.4,
+                    background: val === "yes" ? C.green : C.tan,
+                    color: val === "yes" ? "white" : C.grayText,
+                  }}
+                >
+                  <Check size={13} />
+                </button>
+                <button
+                  disabled={!editable}
+                  onClick={() => onMark(p.id, "no")}
+                  style={{
+                    padding: "0.375rem", borderRadius: "0.5rem", border: "none", opacity: editable ? 1 : 0.4,
+                    background: val === "no" ? C.rust : C.tan,
+                    color: val === "no" ? "white" : C.grayText,
+                  }}
+                >
+                  <X size={13} />
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
