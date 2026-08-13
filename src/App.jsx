@@ -988,36 +988,38 @@ function RosterSection({ title, subtitle, open, players, dayAttendance, isAdmin,
         </span>
       </div>
       {players.length === 0 && <div style={{ fontSize: "0.75rem", color: C.grayText, padding: "0.25rem 0" }}>Enginn skráður í þennan hóp</div>}
-      <div style={{ display: "flex", flexDirection: "column", gap: "0.375rem" }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: "0.625rem" }}>
         {players.map((p) => {
           const val = dayAttendance[p.id];
           const editable = isAdmin || canMark;
           const yesBlocked = !isAdmin && maxReached && val !== "yes";
           return (
             <div key={p.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-              <span style={{ fontSize: "0.875rem", color: "#3D473F" }}>{p.name}</span>
-              <div style={{ display: "flex", gap: "0.25rem" }}>
+              <span style={{ fontSize: "0.9375rem", color: "#3D473F" }}>{p.name}</span>
+              <div style={{ display: "flex", gap: "0.5rem" }}>
                 <button
                   disabled={!editable || yesBlocked}
-                  onClick={() => onMark(p.id, "yes")}
+                  onClick={() => onMark(p.id, val === "yes" ? null : "yes")}
                   style={{
-                    padding: "0.375rem", borderRadius: "0.5rem", border: "none", opacity: (editable && !yesBlocked) ? 1 : 0.4,
+                    padding: "0.625rem", minWidth: "2.5rem", minHeight: "2.5rem", display: "flex", alignItems: "center", justifyContent: "center",
+                    borderRadius: "0.625rem", border: "none", opacity: (editable && !yesBlocked) ? 1 : 0.4,
                     background: val === "yes" ? C.green : C.tan,
                     color: val === "yes" ? "white" : C.grayText,
                   }}
                 >
-                  <Check size={13} />
+                  <Check size={20} />
                 </button>
                 <button
                   disabled={!editable}
-                  onClick={() => onMark(p.id, "no")}
+                  onClick={() => onMark(p.id, val === "no" ? null : "no")}
                   style={{
-                    padding: "0.375rem", borderRadius: "0.5rem", border: "none", opacity: editable ? 1 : 0.4,
+                    padding: "0.625rem", minWidth: "2.5rem", minHeight: "2.5rem", display: "flex", alignItems: "center", justifyContent: "center",
+                    borderRadius: "0.625rem", border: "none", opacity: editable ? 1 : 0.4,
                     background: val === "no" ? C.rust : C.tan,
                     color: val === "no" ? "white" : C.grayText,
                   }}
                 >
-                  <X size={13} />
+                  <X size={20} />
                 </button>
               </div>
             </div>
