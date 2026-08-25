@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo } from "react";
 import {
   Check, X, Settings, Users, ShieldCheck, Plus, Trash2, ChevronLeft, ChevronRight,
   Lock, LockOpen, CalendarDays, Clock, ClipboardList, Ban, Trophy, ListOrdered, Timer, Layers,
-  Wallet, Circle,
+  Wallet, Circle, Crown,
 } from "lucide-react";
 import { createClient } from "@supabase/supabase-js";
 
@@ -512,8 +512,17 @@ export default function App() {
     return { teamA: assignPositions(teamA), teamB: assignPositions(teamB) };
   }
 
-  const mainPlayers = players.filter((p) => p.role === "main");
+  const mainPlayersRaw = players.filter((p) => p.role === "main");
   const subPlayers = players.filter((p) => p.role === "sub");
+  const anyMainAttendance = mainPlayersRaw.some((p) => attendanceCount(p.id) > 0);
+  const mainPlayers = [...mainPlayersRaw].sort((a, b) => {
+    if (!anyMainAttendance) return a.name.localeCompare(b.name, "is");
+    const diff = attendanceCount(b.id) - attendanceCount(a.id);
+    if (diff !== 0) return diff;
+    return a.name.localeCompare(b.name, "is");
+  });
+  const maxMainAttendance = anyMainAttendance ? Math.max(...mainPlayersRaw.map((p) => attendanceCount(p.id))) : 0;
+  const crownIds = anyMainAttendance ? mainPlayers.filter((p) => attendanceCount(p.id) === maxMainAttendance).map((p) => p.id) : [];
 
   const dayAttendance = attendance[selectedDate] || {};
   const comingCount = players.filter((p) => dayAttendance[p.id] === "yes").length;
@@ -806,6 +815,7 @@ export default function App() {
                         maxReached={maxReached}
                         requirePayment={settings.requirePayment && !!currentPeriod}
                         isPaidFor={isPaidFor}
+                        crownIds={crownIds}
                         onMark={setMark}
                       />
                       <RosterSection
@@ -869,6 +879,23 @@ export default function App() {
                   <p style={{ textAlign: "center", fontSize: "0.625rem", color: C.textMuted, marginTop: "0.75rem", padding: "0 1rem" }}>
                     Aðalmenn skrá sig viku fyrir æfingu · Varamenn sólarhring fyrir æfingu · Skráningu lokar klukkutíma fyrir æfingu
                   </p>
+                )}
+
+                {!isCancelled && (
+                  <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", gap: "0.75rem", marginTop: "0.75rem", padding: "0 1rem" }}>
+                    <span style={{ display: "flex", alignItems: "center", gap: "0.3rem", fontSize: "0.625rem", color: C.textMuted }}>
+                      <Circle size={8} fill={C.green} color={C.green} /> Greitt
+                    </span>
+                    <span style={{ display: "flex", alignItems: "center", gap: "0.3rem", fontSize: "0.625rem", color: C.textMuted }}>
+                      <Circle size={8} fill={C.rust} color={C.rust} /> Ógreitt
+                    </span>
+                    <span style={{ display: "flex", alignItems: "center", gap: "0.3rem", fontSize: "0.625rem", color: C.textMuted }}>
+                      <Circle size={8} fill={C.tanBorder} color={C.tanBorder} /> Ekkert tímabil skráð
+                    </span>
+                    <span style={{ display: "flex", alignItems: "center", gap: "0.3rem", fontSize: "0.625rem", color: C.textMuted }}>
+                      <Crown size={12} color={C.gold} fill={C.gold} /> Besta mætingin
+                    </span>
+                  </div>
                 )}
 
                 {teams && (
@@ -1352,7 +1379,7 @@ function TeamCard({ title, bg, team }) {
   );
 }
 
-function RosterSection({ title, subtitle, open, players, dayAttendance, isAdmin, canMark, maxReached, requirePayment, isPaidFor, onMark, isLast }) {
+function RosterSection({ title, subtitle, open, players, dayAttendance, isAdmin, canMark, maxReached, requirePayment, isPaidFor, crownIds, onMark, isLast }) {
   return (
     <div style={{ padding: "0.75rem 1.25rem", borderBottom: !isLast ? `1px dashed ${C.tanBorder}` : "none" }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "0.5rem" }}>
@@ -1376,10 +1403,12 @@ function RosterSection({ title, subtitle, open, players, dayAttendance, isAdmin,
           const unpaidBlock = requirePayment && paid === false;
           const editable = isAdmin || canMark;
           const yesBlocked = (!isAdmin && maxReached && val !== "yes") || (!isAdmin && unpaidBlock && val !== "yes");
+          const hasCrown = crownIds && crownIds.includes(p.id);
           return (
             <div key={p.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
               <span style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.9375rem", color: "#3D473F" }}>
                 <Circle size={9} fill={paid === true ? C.green : paid === false ? C.rust : C.tanBorder} color={paid === true ? C.green : paid === false ? C.rust : C.tanBorder} />
+                {hasCrown && <Crown size={14} color={C.gold} fill={C.gold} />}
                 {p.name}
               </span>
               <div style={{ display: "flex", gap: "0.5rem" }}>
