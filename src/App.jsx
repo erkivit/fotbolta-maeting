@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo } from "react";
 import {
   Check, X, Settings, Users, ShieldCheck, Plus, Trash2, ChevronLeft, ChevronRight,
   Lock, LockOpen, CalendarDays, Clock, ClipboardList, Ban, Trophy, ListOrdered, Timer, Layers,
+  Wallet, Circle,
 } from "lucide-react";
 import { createClient } from "@supabase/supabase-js";
 
@@ -69,6 +70,7 @@ const DEFAULT_SETTINGS = {
   adminPin: "1234",
   maxParticipants: 16,
   minParticipants: 8,
+  requirePayment: false,
 };
 
 function pad(n) { return String(n).padStart(2, "0"); }
@@ -131,6 +133,19 @@ export default function App() {
   const [attendance, setAttendance] = useState({});
   const [cancelled, setCancelled] = useState({});
   const [matchStats, setMatchStats] = useState({});
+  const [costs, setCosts] = useState([]);
+  const [newCostName, setNewCostName] = useState("");
+  const [newCostAmount, setNewCostAmount] = useState("");
+  const [periods, setPeriods] = useState([]);
+  const [payments, setPayments] = useState({});
+  const [financePeriodId, setFinancePeriodId] = useState(null);
+  const [showNewPeriodForm, setShowNewPeriodForm] = useState(false);
+  const [showOlderPeriods, setShowOlderPeriods] = useState(false);
+  const [newPeriodLabel, setNewPeriodLabel] = useState("");
+  const [newPeriodStart, setNewPeriodStart] = useState("");
+  const [newPeriodEnd, setNewPeriodEnd] = useState("");
+  const [newPeriodMainFee, setNewPeriodMainFee] = useState("5000");
+  const [newPeriodSubFee, setNewPeriodSubFee] = useState("3000");
   const [loaded, setLoaded] = useState(false);
   const [tab, setTab] = useState("attendance");
   const [isAdmin, setIsAdmin] = useState(false);
@@ -177,6 +192,18 @@ export default function App() {
         const ms = await storage.get("matchStats", true);
         if (ms?.value) setMatchStats(JSON.parse(ms.value));
       } catch (e) {}
+      try {
+        const co = await storage.get("costs", true);
+        if (co?.value) setCosts(JSON.parse(co.value));
+      } catch (e) {}
+      try {
+        const pr = await storage.get("periods", true);
+        if (pr?.value) setPeriods(JSON.parse(pr.value));
+      } catch (e) {}
+      try {
+        const pay = await storage.get("payments", true);
+        if (pay?.value) setPayments(JSON.parse(pay.value));
+      } catch (e) {}
       setLoaded(true);
     })();
   }, []);
@@ -211,6 +238,24 @@ export default function App() {
     catch (e) { showToast("Villa við að vista úrslit"); }
   }, [showToast]);
 
+  const saveCosts = useCallback(async (next) => {
+    setCosts(next);
+    try { await storage.set("costs", JSON.stringify(next), true); }
+    catch (e) { showToast("Villa við að vista kostnað"); }
+  }, [showToast]);
+
+  const savePeriods = useCallback(async (next) => {
+    setPeriods(next);
+    try { await storage.set("periods", JSON.stringify(next), true); }
+    catch (e) { showToast("Villa við að vista tímabil"); }
+  }, [showToast]);
+
+  const savePayments = useCallback(async (next) => {
+    setPayments(next);
+    try { await storage.set("payments", JSON.stringify(next), true); }
+    catch (e) { showToast("Villa við að vista greiðslur"); }
+  }, [showToast]);
+
   const practiceDates = useMemo(() => getPracticeDates(settings), [settings]);
 
   const upcoming = useMemo(() => {
@@ -221,6 +266,13 @@ export default function App() {
   }, [practiceDates, settings.time]);
 
   useEffect(() => { setSelectedIdx(0); }, [upcoming.length]);
+
+  useEffect(() => {
+    if (financePeriodId || periods.length === 0) return;
+    const todayISO = toISODate(new Date());
+    const current = periods.find((p) => todayISO >= p.start && todayISO <= p.end);
+    setFinancePeriodId(current ? current.id : periods[0].id);
+  }, [periods, financePeriodId]);
 
   const selectedDate = upcoming[selectedIdx];
   const du = selectedDate ? daysUntil(selectedDate, settings.time) : null;
@@ -251,6 +303,14 @@ export default function App() {
     if (!next[selectedDate]) next[selectedDate] = {};
     const current = next[selectedDate][playerId];
     if (value === "yes" && current !== "yes" && !isAdmin) {
+      if (settings.requirePayment) {
+        const period = periodForDate(selectedDate);
+        const hasPaid = !period || !!(payments[period.id] && payments[period.id][playerId]);
+        if (period && !hasPaid) {
+          showToast("Þarf að greiða æfingagjald til að skrá sig");
+          return;
+        }
+      }
       const yesCount = players.filter((p) => next[selectedDate][p.id] === "yes").length;
       if (yesCount >= (settings.maxParticipants || 0)) {
         showToast("Æfingin er fullbókuð");
@@ -290,7 +350,7 @@ export default function App() {
     const name = newPlayerName.trim();
     if (!name) return;
     const id = `p_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-    savePlayers([...players, { id, name, role: newPlayerRole, positionPriority: {} }]);
+    savePlayers([...players, { id, name, role: newPlayerRole, positionPriority: {}, paid: false }]);
     setNewPlayerName("");
     showToast(`${name} bætt við`);
   }
@@ -301,6 +361,72 @@ export default function App() {
 
   function toggleRole(id) {
     savePlayers(players.map((p) => (p.id === id ? { ...p, role: p.role === "main" ? "sub" : "main" } : p)));
+  }
+
+  function togglePaid(periodId, playerId) {
+    if (!periodId) return;
+    const next = { ...payments };
+    const periodPayments = { ...(next[periodId] || {}) };
+    periodPayments[playerId] = !periodPayments[playerId];
+    next[periodId] = periodPayments;
+    savePayments(next);
+  }
+
+  function addPeriod() {
+    const label = newPeriodLabel.trim();
+    if (!label || !newPeriodStart || !newPeriodEnd) return;
+    const id = `pr_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    savePeriods([...periods, {
+      id, label, start: newPeriodStart, end: newPeriodEnd,
+      mainFee: Math.max(0, parseInt(newPeriodMainFee, 10) || 0),
+      subFee: Math.max(0, parseInt(newPeriodSubFee, 10) || 0),
+    }]);
+    setNewPeriodLabel("");
+    setNewPeriodStart("");
+    setNewPeriodEnd("");
+    setShowNewPeriodForm(false);
+    setFinancePeriodId(id);
+    showToast(`Tímabil "${label}" búið til`);
+  }
+
+  function startNewPeriod() {
+    // Ef tímabil eru til fyrir, stinga upp á að nýja tímabilið byrji daginn eftir að því síðasta lýkur.
+    if (periods.length > 0) {
+      const latestEnd = [...periods].sort((a, b) => b.end.localeCompare(a.end))[0];
+      const last = periods.find((p) => p.id === latestEnd.id);
+      const nextDay = new Date(last.end + "T00:00:00");
+      nextDay.setDate(nextDay.getDate() + 1);
+      setNewPeriodStart(toISODate(nextDay));
+      setNewPeriodMainFee(String(last.mainFee));
+      setNewPeriodSubFee(String(last.subFee));
+    }
+    setNewPeriodLabel("");
+    setNewPeriodEnd("");
+    setShowNewPeriodForm(true);
+  }
+
+  function removePeriod(id) {
+    savePeriods(periods.filter((p) => p.id !== id));
+    if (financePeriodId === id) setFinancePeriodId(null);
+  }
+
+  function periodForDate(dateISO) {
+    if (!dateISO) return null;
+    return periods.find((pr) => dateISO >= pr.start && dateISO <= pr.end) || null;
+  }
+
+  function addCost() {
+    const name = newCostName.trim();
+    const amount = Math.max(0, parseInt(newCostAmount, 10) || 0);
+    if (!name || !amount || !financePeriodId) return;
+    const id = `c_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    saveCosts([...costs, { id, name, amount, periodId: financePeriodId }]);
+    setNewCostName("");
+    setNewCostAmount("");
+  }
+
+  function removeCost(id) {
+    saveCosts(costs.filter((c) => c.id !== id));
   }
 
   function openPositionEditor(p) {
@@ -395,6 +521,8 @@ export default function App() {
   const confirmedPlayers = players.filter((p) => dayAttendance[p.id] === "yes");
   const notEnoughPlayers = registrationClosed && !isCancelled && confirmedPlayers.length < (settings.minParticipants || 0);
   const teams = registrationClosed && !isCancelled && !notEnoughPlayers ? computeTeams(selectedDate) : null;
+  const currentPeriod = periodForDate(selectedDate);
+  const isPaidFor = (playerId) => (currentPeriod ? !!(payments[currentPeriod.id] && payments[currentPeriod.id][playerId]) : null);
 
   const inputStyle = {
     width: "100%",
@@ -420,7 +548,11 @@ export default function App() {
     { id: "attendance", label: "Æfingar", icon: ClipboardList },
     { id: "positions", label: "Stöður", icon: ListOrdered },
     { id: "stats", label: "Tölfræði", icon: Trophy },
-    ...(isAdmin ? [{ id: "players", label: "Leikmenn", icon: Users }, { id: "settings", label: "Stillingar", icon: Settings }] : []),
+    ...(isAdmin ? [
+      { id: "players", label: "Leikmenn", icon: Users },
+      { id: "finance", label: "Greiðslur", icon: Wallet },
+      { id: "settings", label: "Stillingar", icon: Settings },
+    ] : []),
   ];
 
   return (
@@ -672,6 +804,8 @@ export default function App() {
                         isAdmin={isAdmin}
                         canMark={canMark("main")}
                         maxReached={maxReached}
+                        requirePayment={settings.requirePayment && !!currentPeriod}
+                        isPaidFor={isPaidFor}
                         onMark={setMark}
                       />
                       <RosterSection
@@ -683,6 +817,8 @@ export default function App() {
                         isAdmin={isAdmin}
                         canMark={canMark("sub")}
                         maxReached={maxReached}
+                        requirePayment={settings.requirePayment && !!currentPeriod}
+                        isPaidFor={isPaidFor}
                         onMark={setMark}
                         isLast={!registrationClosed}
                       />
@@ -868,6 +1004,251 @@ export default function App() {
           </div>
         )}
 
+        {tab === "finance" && isAdmin && (() => {
+          const todayISO = toISODate(new Date());
+          const sortedPeriods = [...periods].sort((a, b) => a.start.localeCompare(b.start));
+          const currentAndFuture = sortedPeriods.filter((p) => p.end >= todayISO);
+          const olderPeriods = sortedPeriods.filter((p) => p.end < todayISO);
+          const activePeriod = periods.find((p) => p.id === financePeriodId) || null;
+          const periodCosts = activePeriod ? costs.filter((c) => c.periodId === activePeriod.id) : [];
+          const totalCosts = periodCosts.reduce((sum, c) => sum + c.amount, 0);
+          const feeFor = (p) => (!activePeriod ? 0 : p.role === "main" ? activePeriod.mainFee : activePeriod.subFee);
+          const totalDue = activePeriod ? players.reduce((sum, p) => sum + feeFor(p), 0) : 0;
+          const periodPayments = activePeriod ? (payments[activePeriod.id] || {}) : {};
+          const totalCollected = activePeriod ? players.filter((p) => periodPayments[p.id]).reduce((sum, p) => sum + feeFor(p), 0) : 0;
+          const balance = totalCollected - totalCosts;
+
+          const renderPeriodRow = (pr) => (
+            <div
+              key={pr.id}
+              onClick={() => setFinancePeriodId(pr.id)}
+              style={{
+                display: "flex", alignItems: "center", justifyContent: "space-between", cursor: "pointer",
+                padding: "0.625rem 0.75rem", borderRadius: "0.625rem",
+                background: financePeriodId === pr.id ? C.gold : C.tan,
+              }}
+            >
+              <div>
+                <div style={{ fontSize: "0.8125rem", fontWeight: 600, color: C.ink }}>{pr.label}</div>
+                <div style={{ fontSize: "0.6875rem", color: financePeriodId === pr.id ? "#5C4A1E" : C.inkMuted }}>
+                  {fmtDateShort(pr.start)} – {fmtDateShort(pr.end)} · {pr.mainFee.toLocaleString("is-IS")}/{pr.subFee.toLocaleString("is-IS")} kr
+                </div>
+              </div>
+              <button
+                onClick={(e) => { e.stopPropagation(); removePeriod(pr.id); }}
+                style={{ color: C.rust, padding: "0.25rem", background: "transparent", border: "none" }}
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
+          );
+
+          return (
+            <div style={{ marginTop: "0.5rem", display: "flex", flexDirection: "column", gap: "1rem" }}>
+              {/* Tímabil */}
+              <div style={cardStyle}>
+                <div style={{ padding: "1rem" }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "0.75rem" }}>
+                    <div className="display-font" style={{ fontSize: "0.875rem", fontWeight: 600, textTransform: "uppercase", color: C.ink }}>Greiðslutímabil</div>
+                    {!showNewPeriodForm && (
+                      <button
+                        onClick={startNewPeriod}
+                        style={{ display: "flex", alignItems: "center", gap: "0.25rem", fontSize: "0.75rem", fontWeight: 600, color: "white", background: C.green, borderRadius: "9999px", padding: "0.375rem 0.75rem", border: "none" }}
+                      >
+                        <Plus size={13} /> Hefja nýtt tímabil
+                      </button>
+                    )}
+                  </div>
+
+                  {sortedPeriods.length === 0 && !showNewPeriodForm ? (
+                    <p style={{ fontSize: "0.8125rem", color: C.inkMuted, marginBottom: "0.75rem" }}>Ekkert tímabil til ennþá — ýttu á "Hefja nýtt tímabil" til að búa til það fyrsta.</p>
+                  ) : (
+                    <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", marginBottom: showNewPeriodForm ? "1rem" : 0 }}>
+                      {currentAndFuture.length === 0 && olderPeriods.length > 0 && (
+                        <p style={{ fontSize: "0.75rem", color: C.inkMuted }}>Ekkert gildandi tímabil núna — sjá eldri tímabil hér fyrir neðan, eða hefja nýtt.</p>
+                      )}
+                      {currentAndFuture.map(renderPeriodRow)}
+
+                      {olderPeriods.length > 0 && (
+                        <div style={{ marginTop: "0.25rem" }}>
+                          <button
+                            onClick={() => setShowOlderPeriods((v) => !v)}
+                            style={{ fontSize: "0.75rem", fontWeight: 500, color: C.inkMuted, background: "transparent", border: "none", padding: "0.25rem 0" }}
+                          >
+                            {showOlderPeriods ? "▾" : "▸"} Eldri tímabil ({olderPeriods.length})
+                          </button>
+                          {showOlderPeriods && (
+                            <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", marginTop: "0.5rem" }}>
+                              {[...olderPeriods].reverse().map(renderPeriodRow)}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {showNewPeriodForm && (
+                    <div style={{ paddingTop: "0.75rem", borderTop: `1px dashed ${C.tanBorder}` }}>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "0.5rem" }}>
+                        <div style={{ fontSize: "0.75rem", fontWeight: 600, color: C.ink }}>Nýtt tímabil</div>
+                        <button onClick={() => setShowNewPeriodForm(false)} style={{ fontSize: "0.75rem", color: C.inkMuted, background: "transparent", border: "none" }}>Hætta við</button>
+                      </div>
+                      <input
+                        value={newPeriodLabel}
+                        onChange={(e) => setNewPeriodLabel(e.target.value)}
+                        placeholder="T.d. Vor 2027"
+                        style={{ ...inputStyle, marginBottom: "0.5rem" }}
+                      />
+                      <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.5rem" }}>
+                        <div style={{ flex: 1 }}>
+                          <label style={labelStyle}>Byrjar</label>
+                          <input type="date" value={newPeriodStart} onChange={(e) => setNewPeriodStart(e.target.value)} style={inputStyle} />
+                        </div>
+                        <div style={{ flex: 1 }}>
+                          <label style={labelStyle}>Endar</label>
+                          <input type="date" value={newPeriodEnd} onChange={(e) => setNewPeriodEnd(e.target.value)} style={inputStyle} />
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.75rem" }}>
+                        <div style={{ flex: 1 }}>
+                          <label style={labelStyle}>Gjald aðalmanna</label>
+                          <input type="number" min="0" value={newPeriodMainFee} onChange={(e) => setNewPeriodMainFee(e.target.value)} style={inputStyle} />
+                        </div>
+                        <div style={{ flex: 1 }}>
+                          <label style={labelStyle}>Gjald varamanna</label>
+                          <input type="number" min="0" value={newPeriodSubFee} onChange={(e) => setNewPeriodSubFee(e.target.value)} style={inputStyle} />
+                        </div>
+                      </div>
+                      <button onClick={addPeriod} style={{ width: "100%", background: C.green, color: "white", borderRadius: "0.5rem", padding: "0.5rem", border: "none", fontSize: "0.8125rem", fontWeight: 500 }}>
+                        Búa til tímabil
+                      </button>
+                    </div>
+                  )}
+
+                  <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.8125rem", color: C.ink, cursor: "pointer", marginTop: "1rem", paddingTop: "0.75rem", borderTop: `1px dashed ${C.tanBorder}` }}>
+                    <input
+                      type="checkbox"
+                      checked={!!settings.requirePayment}
+                      onChange={(e) => saveSettings({ ...settings, requirePayment: e.target.checked })}
+                      style={{ width: "1.125rem", height: "1.125rem" }}
+                    />
+                    Þeir sem ekki hafa greitt fyrir gildandi tímabil geta ekki merkt sig á æfingu
+                  </label>
+                </div>
+              </div>
+
+              {!activePeriod ? (
+                <div style={{ ...cardStyle, padding: "1.5rem", textAlign: "center", color: C.inkMuted, fontSize: "0.8125rem" }}>
+                  Veldu tímabil hér fyrir ofan til að sjá kostnað og greiðslustöðu.
+                </div>
+              ) : (
+                <>
+                  {/* Yfirlit */}
+                  <div style={cardStyle}>
+                    <div style={{ padding: "1rem" }}>
+                      <div className="display-font" style={{ fontSize: "0.875rem", fontWeight: 600, textTransform: "uppercase", color: C.ink, marginBottom: "0.25rem" }}>Yfirlit — {activePeriod.label}</div>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem", marginTop: "0.5rem" }}>
+                        <div>
+                          <div style={{ fontSize: "0.6875rem", color: C.inkMuted }}>Innheimt</div>
+                          <div className="display-font" style={{ fontSize: "1.25rem", fontWeight: 600, color: C.green }}>{totalCollected.toLocaleString("is-IS")} kr</div>
+                          <div style={{ fontSize: "0.625rem", color: C.grayText }}>af {totalDue.toLocaleString("is-IS")} kr samtals</div>
+                        </div>
+                        <div>
+                          <div style={{ fontSize: "0.6875rem", color: C.inkMuted }}>Kostnaður samtals</div>
+                          <div className="display-font" style={{ fontSize: "1.25rem", fontWeight: 600, color: C.rust }}>{totalCosts.toLocaleString("is-IS")} kr</div>
+                        </div>
+                      </div>
+                      <div style={{ marginTop: "0.75rem", paddingTop: "0.75rem", borderTop: `1px dashed ${C.tanBorder}` }}>
+                        <div style={{ fontSize: "0.6875rem", color: C.inkMuted }}>Staða (innheimt − kostnaður)</div>
+                        <div className="display-font" style={{ fontSize: "1.25rem", fontWeight: 600, color: balance >= 0 ? C.green : C.rust }}>
+                          {balance.toLocaleString("is-IS")} kr
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Kostnaðarliðir */}
+                  <div style={cardStyle}>
+                    <div style={{ padding: "1rem" }}>
+                      <div className="display-font" style={{ fontSize: "0.875rem", fontWeight: 600, textTransform: "uppercase", color: C.ink, marginBottom: "0.75rem" }}>
+                        Kostnaðarliðir — {activePeriod.label}
+                      </div>
+                      <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.75rem" }}>
+                        <input
+                          value={newCostName}
+                          onChange={(e) => setNewCostName(e.target.value)}
+                          placeholder="T.d. Leiga á velli"
+                          style={{ ...inputStyle, flex: 2 }}
+                        />
+                        <input
+                          type="number" min="0"
+                          value={newCostAmount}
+                          onChange={(e) => setNewCostAmount(e.target.value)}
+                          placeholder="Kr"
+                          style={{ ...inputStyle, flex: 1 }}
+                        />
+                        <button onClick={addCost} style={{ background: C.green, color: "white", borderRadius: "0.5rem", padding: "0.5rem 0.75rem", border: "none" }}>
+                          <Plus size={16} />
+                        </button>
+                      </div>
+                      {periodCosts.length === 0 ? (
+                        <p style={{ fontSize: "0.8125rem", color: C.inkMuted }}>Engir kostnaðarliðir skráðir á þessu tímabili ennþá.</p>
+                      ) : (
+                        <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+                          {periodCosts.map((c) => (
+                            <div key={c.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                              <span style={{ fontSize: "0.8125rem", color: C.ink }}>{c.name}</span>
+                              <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                                <span style={{ fontSize: "0.8125rem", color: C.inkMuted }}>{c.amount.toLocaleString("is-IS")} kr</span>
+                                <button onClick={() => removeCost(c.id)} style={{ color: C.rust, padding: "0.25rem", background: "transparent", border: "none" }}>
+                                  <Trash2 size={14} />
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Greiðslustaða leikmanna */}
+                  <div style={{ ...cardStyle, overflow: "hidden" }}>
+                    <div className="display-font" style={{ padding: "1rem 1rem 0.5rem", fontSize: "0.875rem", fontWeight: 600, textTransform: "uppercase", color: C.ink }}>
+                      Greiðslustaða — {activePeriod.label}
+                    </div>
+                    {players.length === 0 && (
+                      <div style={{ padding: "0 1rem 1rem", fontSize: "0.875rem", color: C.inkMuted }}>Enginn leikmaður skráður ennþá.</div>
+                    )}
+                    {players.map((p, i) => {
+                      const hasPaid = !!periodPayments[p.id];
+                      return (
+                        <div key={p.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "0.625rem 1rem", borderBottom: i !== players.length - 1 ? `1px solid ${C.divider}` : "none" }}>
+                          <div>
+                            <div style={{ fontSize: "0.875rem", color: C.ink }}>{p.name}</div>
+                            <div style={{ fontSize: "0.6875rem", color: C.grayText }}>{feeFor(p).toLocaleString("is-IS")} kr · {p.role === "main" ? "Aðalmaður" : "Varamaður"}</div>
+                          </div>
+                          <button
+                            onClick={() => togglePaid(activePeriod.id, p.id)}
+                            style={{
+                              display: "flex", alignItems: "center", gap: "0.375rem", fontSize: "0.75rem", fontWeight: 500,
+                              padding: "0.375rem 0.75rem", borderRadius: "9999px", border: "none",
+                              background: hasPaid ? C.greenLight : "#F5DCD5",
+                              color: hasPaid ? C.green : C.rust,
+                            }}
+                          >
+                            <Circle size={9} fill={hasPaid ? C.green : C.rust} color={hasPaid ? C.green : C.rust} />
+                            {hasPaid ? "Greitt" : "Ógreitt"}
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
+            </div>
+          );
+        })()}
+
         {tab === "settings" && isAdmin && (
           <div style={{ marginTop: "0.5rem", display: "flex", flexDirection: "column", gap: "1rem" }}>
             <div style={cardStyle}>
@@ -971,7 +1352,7 @@ function TeamCard({ title, bg, team }) {
   );
 }
 
-function RosterSection({ title, subtitle, open, players, dayAttendance, isAdmin, canMark, maxReached, onMark, isLast }) {
+function RosterSection({ title, subtitle, open, players, dayAttendance, isAdmin, canMark, maxReached, requirePayment, isPaidFor, onMark, isLast }) {
   return (
     <div style={{ padding: "0.75rem 1.25rem", borderBottom: !isLast ? `1px dashed ${C.tanBorder}` : "none" }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "0.5rem" }}>
@@ -991,11 +1372,16 @@ function RosterSection({ title, subtitle, open, players, dayAttendance, isAdmin,
       <div style={{ display: "flex", flexDirection: "column", gap: "0.625rem" }}>
         {players.map((p) => {
           const val = dayAttendance[p.id];
+          const paid = isPaidFor ? isPaidFor(p.id) : null;
+          const unpaidBlock = requirePayment && paid === false;
           const editable = isAdmin || canMark;
-          const yesBlocked = !isAdmin && maxReached && val !== "yes";
+          const yesBlocked = (!isAdmin && maxReached && val !== "yes") || (!isAdmin && unpaidBlock && val !== "yes");
           return (
             <div key={p.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-              <span style={{ fontSize: "0.9375rem", color: "#3D473F" }}>{p.name}</span>
+              <span style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.9375rem", color: "#3D473F" }}>
+                <Circle size={9} fill={paid === true ? C.green : paid === false ? C.rust : C.tanBorder} color={paid === true ? C.green : paid === false ? C.rust : C.tanBorder} />
+                {p.name}
+              </span>
               <div style={{ display: "flex", gap: "0.5rem" }}>
                 <button
                   disabled={!editable || yesBlocked}
