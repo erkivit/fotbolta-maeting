@@ -74,6 +74,17 @@ const DEFAULT_SETTINGS = {
   allowGoals: true,
 };
 
+// Einföld strengjatætifall (FNV-1a). Notað til að raða jöfnum leikmönnum tilviljunarkennt
+// en samt eins hjá öllum og á hverri endurhleðslu fyrir sömu æfingu.
+function hashStr(str) {
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
 function pad(n) { return String(n).padStart(2, "0"); }
 function toISODate(d) { return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; }
 
@@ -500,6 +511,26 @@ export default function App() {
     }, 0);
   }
 
+  // Fjöldi æfinga sem leikmaðurinn mætti á og fóru fram (ekki felldar niður og nógu margir skráðir).
+  // Aðeins liðnar æfingar, og fyrir beforeDate ef það er gefið.
+  function gamesPlayed(playerId, beforeDate) {
+    const now = Date.now();
+    return Object.entries(attendance).filter(([date, day]) => {
+      if (!day || day[playerId] !== "yes") return false;
+      if (beforeDate && date >= beforeDate) return false;
+      if (cancelled[date]) return false;
+      if (practiceDateTime(date, settings.time).getTime() > now) return false;
+      const yesCount = Object.values(day).filter((v) => v === "yes").length;
+      return yesCount >= (settings.minParticipants || 0);
+    }).length;
+  }
+  // Vinningshlutfall = stig / æfingar sem fóru fram. 0 ef ekkert er skráð.
+  function winRate(playerId, beforeDate) {
+    const games = gamesPlayed(playerId, beforeDate);
+    if (games === 0) return 0;
+    return Math.min(1, totalWins(playerId, beforeDate) / games);
+  }
+
   function setWinner(color) {
     if (!selectedDate || !teams) return;
     const existing = teamResults[selectedDate];
@@ -520,19 +551,24 @@ export default function App() {
     const confirmed = players.filter((p) => attendance[dateISO] && attendance[dateISO][p.id] === "yes");
     if (confirmed.length === 0) return null;
 
-    const withScore = confirmed.map((p) => ({
+    const withRate = confirmed.map((p) => ({
       ...p,
-      score: totalGoals(p.id, dateISO) + totalWins(p.id, dateISO),
+      rate: winRate(p.id, dateISO),
       att: attendanceCount(p.id, dateISO),
+      tie: hashStr(`${dateISO}:${p.id}`),
     }));
-    withScore.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name, "is"));
+    // Hæsta vinningshlutfall fyrst. Jafnt hlutfall (líka 0 / ekkert skráð) raðast tilviljunarkennt,
+    // en stöðugt fyrir hverja æfingu svo liðin breytist ekki við endurhleðslu.
+    withRate.sort((a, b) => b.rate - a.rate || a.tie - b.tie || a.id.localeCompare(b.id));
 
-    const teamA = [];
-    const teamB = [];
-    withScore.forEach((p, i) => {
-      const rank = i + 1; // 1-indexed
-      (rank % 2 === 1 ? teamA : teamB).push(p);
-    });
+    // Til skiptis: hæsta hlutfall í rauða liðið, næst hæsta í bláa, o.s.frv.
+    // Sé fjöldinn oddatala fer sá neðsti í bláa liðið, svo það sé einum fleiri.
+    const red = [];
+    const blue = [];
+    const extraBlue = withRate.length % 2 === 1 ? withRate[withRate.length - 1] : null;
+    const alternating = extraBlue ? withRate.slice(0, -1) : withRate;
+    alternating.forEach((p, i) => (i % 2 === 0 ? red : blue).push(p));
+    if (extraBlue) blue.push(extraBlue);
 
     function assignPositions(team) {
       const ordered = [...team].sort((a, b) => b.att - a.att || a.name.localeCompare(b.name, "is"));
@@ -557,7 +593,8 @@ export default function App() {
       return result;
     }
 
-    return { teamA: assignPositions(teamA), teamB: assignPositions(teamB) };
+    // teamA = Bláir, teamB = Rauðir (sama og í birtingunni).
+    return { teamA: assignPositions(blue), teamB: assignPositions(red) };
   }
 
   const mainPlayersRaw = players.filter((p) => p.role === "main");
@@ -1036,15 +1073,18 @@ export default function App() {
         {tab === "stats" && (
           <div style={{ marginTop: "0.5rem" }}>
             <div style={{ ...cardStyle, overflow: "hidden" }}>
-              <div style={{ display: "grid", gridTemplateColumns: "1.6fr 0.8fr 0.8fr 0.8fr", padding: "0.75rem 1rem", background: C.tan, fontSize: "0.6875rem", fontWeight: 600, textTransform: "uppercase", color: C.inkMuted }}>
-                <span>Nafn</span><span style={{ textAlign: "center" }}>Mæt.</span><span style={{ textAlign: "center" }}>Mörk</span><span style={{ textAlign: "center" }}>Stig</span>
+              <div style={{ display: "grid", gridTemplateColumns: "1.5fr 0.7fr 0.7fr 0.7fr 0.8fr", padding: "0.75rem 1rem", background: C.tan, fontSize: "0.6875rem", fontWeight: 600, textTransform: "uppercase", color: C.inkMuted }}>
+                <span>Nafn</span><span style={{ textAlign: "center" }}>Mæt.</span><span style={{ textAlign: "center" }}>Mörk</span><span style={{ textAlign: "center" }}>Stig</span><span style={{ textAlign: "center" }}>Hlutf.</span>
               </div>
               {[...players].sort((a, b) => attendanceCount(b.id) - attendanceCount(a.id)).map((p, i) => (
-                <div key={p.id} style={{ display: "grid", gridTemplateColumns: "1.6fr 0.8fr 0.8fr 0.8fr", padding: "0.625rem 1rem", borderBottom: i !== players.length - 1 ? `1px solid ${C.divider}` : "none", alignItems: "center" }}>
+                <div key={p.id} style={{ display: "grid", gridTemplateColumns: "1.5fr 0.7fr 0.7fr 0.7fr 0.8fr", padding: "0.625rem 1rem", borderBottom: i !== players.length - 1 ? `1px solid ${C.divider}` : "none", alignItems: "center" }}>
                   <span style={{ fontSize: "0.8125rem", color: C.ink }}>{p.name}</span>
                   <span style={{ fontSize: "0.8125rem", color: C.ink, textAlign: "center" }}>{attendanceCount(p.id)}</span>
                   <span style={{ fontSize: "0.8125rem", color: C.ink, textAlign: "center" }}>{totalGoals(p.id)}</span>
                   <span style={{ fontSize: "0.8125rem", color: C.ink, textAlign: "center" }}>{totalWins(p.id)}</span>
+                  <span style={{ fontSize: "0.8125rem", color: C.ink, textAlign: "center" }}>
+                    {gamesPlayed(p.id) > 0 ? `${Math.round(winRate(p.id) * 100)}%` : "–"}
+                  </span>
                 </div>
               ))}
               {players.length === 0 && (
