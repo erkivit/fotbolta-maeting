@@ -58,8 +58,8 @@ const C = {
   goldBg2: "#F3E6C6",
   goldText2: "#8A6A22",
   grayText: "#8A8370",
-  teamABg: "#DDEEE1",
-  teamBBg: "#F3E6C6",
+  teamBlue: "#2F5FA8",
+  teamRed: "#C23B3B",
 };
 
 const DEFAULT_SETTINGS = {
@@ -71,6 +71,7 @@ const DEFAULT_SETTINGS = {
   maxParticipants: 16,
   minParticipants: 8,
   requirePayment: false,
+  allowGoals: true,
 };
 
 function pad(n) { return String(n).padStart(2, "0"); }
@@ -133,6 +134,7 @@ export default function App() {
   const [attendance, setAttendance] = useState({});
   const [cancelled, setCancelled] = useState({});
   const [matchStats, setMatchStats] = useState({});
+  const [teamResults, setTeamResults] = useState({});
   const [costs, setCosts] = useState([]);
   const [newCostName, setNewCostName] = useState("");
   const [newCostAmount, setNewCostAmount] = useState("");
@@ -193,6 +195,10 @@ export default function App() {
         if (ms?.value) setMatchStats(JSON.parse(ms.value));
       } catch (e) {}
       try {
+        const tr = await storage.get("teamResults", true);
+        if (tr?.value) setTeamResults(JSON.parse(tr.value));
+      } catch (e) {}
+      try {
         const co = await storage.get("costs", true);
         if (co?.value) setCosts(JSON.parse(co.value));
       } catch (e) {}
@@ -236,6 +242,12 @@ export default function App() {
     setMatchStats(next);
     try { await storage.set("matchStats", JSON.stringify(next), true); }
     catch (e) { showToast("Villa við að vista úrslit"); }
+  }, [showToast]);
+
+  const saveTeamResults = useCallback(async (next) => {
+    setTeamResults(next);
+    try { await storage.set("teamResults", JSON.stringify(next), true); }
+    catch (e) { showToast("Villa við að vista sigurlið"); }
   }, [showToast]);
 
   const saveCosts = useCallback(async (next) => {
@@ -468,14 +480,40 @@ export default function App() {
     saveMatchStats(next);
   }
 
-  function attendanceCount(playerId) {
-    return Object.values(attendance).filter((day) => day && day[playerId] === "yes").length;
+  // beforeDate (valkvæmt): telur aðeins æfingar fyrir þá dagsetningu. Notað við liðaskiptingu
+  // svo liðin breytist ekki þegar mörk/úrslit þeirrar æfingar eru skráð eftir á.
+  function attendanceCount(playerId, beforeDate) {
+    return Object.entries(attendance).filter(([date, day]) => (!beforeDate || date < beforeDate) && day && day[playerId] === "yes").length;
   }
-  function totalGoals(playerId) {
-    return Object.values(matchStats).reduce((sum, day) => sum + ((day && day[playerId] && day[playerId].goals) || 0), 0);
+  function totalGoals(playerId, beforeDate) {
+    return Object.entries(matchStats).reduce(
+      (sum, [date, day]) => ((!beforeDate || date < beforeDate) ? sum + ((day && day[playerId] && day[playerId].goals) || 0) : sum),
+      0
+    );
   }
-  function totalWins(playerId) {
-    return Object.values(matchStats).reduce((sum, day) => sum + ((day && day[playerId] && day[playerId].wins) || 0), 0);
+  // Stig = fjöldi æfinga þar sem leikmaðurinn var í liðinu sem vann.
+  function totalWins(playerId, beforeDate) {
+    return Object.entries(teamResults).reduce((sum, [date, r]) => {
+      if (beforeDate && date >= beforeDate) return sum;
+      const winners = r && (r.winner === "blue" ? r.blue : r.red);
+      return sum + (winners && winners.some((x) => x.id === playerId) ? 1 : 0);
+    }, 0);
+  }
+
+  function setWinner(color) {
+    if (!selectedDate || !teams) return;
+    const existing = teamResults[selectedDate];
+    const next = { ...teamResults };
+    if (existing && existing.winner === color) {
+      delete next[selectedDate];
+      showToast("Sigurlið afskráð");
+    } else {
+      // Vistum hvernig liðin voru skipuð þegar sigurliðið er skráð, svo stigin haldist rétt.
+      const base = existing || { blue: teams.teamA, red: teams.teamB };
+      next[selectedDate] = { winner: color, blue: base.blue, red: base.red };
+      showToast(color === "blue" ? "Bláir skráðir sigurvegarar" : "Rauðir skráðir sigurvegarar");
+    }
+    saveTeamResults(next);
   }
 
   function computeTeams(dateISO) {
@@ -484,8 +522,8 @@ export default function App() {
 
     const withScore = confirmed.map((p) => ({
       ...p,
-      score: totalGoals(p.id) + totalWins(p.id),
-      att: attendanceCount(p.id),
+      score: totalGoals(p.id, dateISO) + totalWins(p.id, dateISO),
+      att: attendanceCount(p.id, dateISO),
     }));
     withScore.sort((a, b) => b.score - a.score || a.name.localeCompare(b.name, "is"));
 
@@ -540,6 +578,10 @@ export default function App() {
   const confirmedPlayers = players.filter((p) => dayAttendance[p.id] === "yes");
   const notEnoughPlayers = registrationClosed && !isCancelled && confirmedPlayers.length < (settings.minParticipants || 0);
   const teams = registrationClosed && !isCancelled && !notEnoughPlayers ? computeTeams(selectedDate) : null;
+  const teamResult = (selectedDate && teamResults[selectedDate]) || null;
+  const shownTeams = teams ? (teamResult ? { teamA: teamResult.blue, teamB: teamResult.red } : teams) : null;
+  const practiceStarted = selectedDate ? practiceDateTime(selectedDate, settings.time).getTime() <= Date.now() : false;
+  const canSetWinner = !!teams && (isAdmin || practiceStarted);
   const currentPeriod = periodForDate(selectedDate);
   const isPaidFor = (playerId) => (currentPeriod ? !!(payments[currentPeriod.id] && payments[currentPeriod.id][playerId]) : null);
 
@@ -845,11 +887,11 @@ export default function App() {
                         isLast={!registrationClosed}
                       />
 
-                      {registrationClosed && (
+                      {registrationClosed && settings.allowGoals !== false && (
                         <div style={{ padding: "1rem 1.25rem", borderTop: `1px dashed ${C.tanBorder}` }}>
                           <div style={{ display: "flex", alignItems: "center", gap: "0.375rem", fontSize: "0.75rem", fontWeight: 600, textTransform: "uppercase", color: C.ink, marginBottom: "0.5rem" }}>
                             <Trophy size={13} />
-                            Skrá úrslit æfingar
+                            Markaskorarar
                           </div>
                           {confirmedPlayers.length === 0 ? (
                             <p style={{ fontSize: "0.75rem", color: C.grayText }}>Enginn skráður sem mætti.</p>
@@ -865,14 +907,6 @@ export default function App() {
                                       <input
                                         type="number" min="0" value={row.goals}
                                         onChange={(e) => setMatchStat(p.id, "goals", e.target.value)}
-                                        style={{ width: "3rem", border: `1px solid ${C.tanBorder}`, borderRadius: "0.375rem", padding: "0.25rem", fontSize: "0.8125rem", textAlign: "center" }}
-                                      />
-                                    </div>
-                                    <div style={{ display: "flex", alignItems: "center", gap: "0.25rem" }}>
-                                      <span style={{ fontSize: "0.625rem", color: C.inkMuted }}>Sigrar</span>
-                                      <input
-                                        type="number" min="0" value={row.wins}
-                                        onChange={(e) => setMatchStat(p.id, "wins", e.target.value)}
                                         style={{ width: "3rem", border: `1px solid ${C.tanBorder}`, borderRadius: "0.375rem", padding: "0.25rem", fontSize: "0.8125rem", textAlign: "center" }}
                                       />
                                     </div>
@@ -910,14 +944,55 @@ export default function App() {
                   </div>
                 )}
 
-                {teams && (
+                {shownTeams && (
                   <div style={{ marginTop: "1rem" }}>
                     <div style={{ display: "flex", alignItems: "center", gap: "0.375rem", color: C.textLight, fontSize: "0.8125rem", fontWeight: 600, textTransform: "uppercase", marginBottom: "0.5rem" }}>
                       <Layers size={14} /> Liðaskipting
                     </div>
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem" }}>
-                      <TeamCard title="Lið A" bg={C.teamABg} team={teams.teamA} />
-                      <TeamCard title="Lið B" bg={C.teamBBg} team={teams.teamB} />
+                      <TeamCard title="Bláir" bg={C.teamBlue} team={shownTeams.teamA} isWinner={!!teamResult && teamResult.winner === "blue"} />
+                      <TeamCard title="Rauðir" bg={C.teamRed} team={shownTeams.teamB} isWinner={!!teamResult && teamResult.winner === "red"} />
+                    </div>
+
+                    <div style={{ ...cardStyle, padding: "0.875rem 1rem", marginTop: "0.75rem" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: "0.375rem", fontSize: "0.75rem", fontWeight: 600, textTransform: "uppercase", color: C.ink, marginBottom: "0.5rem" }}>
+                        <Trophy size={13} /> Hvort liðið vann?
+                      </div>
+                      {canSetWinner ? (
+                        <>
+                          <div style={{ display: "flex", gap: "0.5rem" }}>
+                            {[
+                              { key: "blue", label: "Bláir unnu", color: C.teamBlue },
+                              { key: "red", label: "Rauðir unnu", color: C.teamRed },
+                            ].map((opt) => {
+                              const selected = !!teamResult && teamResult.winner === opt.key;
+                              return (
+                                <button
+                                  key={opt.key}
+                                  onClick={() => setWinner(opt.key)}
+                                  style={{
+                                    flex: 1, minHeight: "2.75rem", display: "flex", alignItems: "center", justifyContent: "center", gap: "0.375rem",
+                                    borderRadius: "0.625rem", fontSize: "0.875rem", fontWeight: 600,
+                                    border: `2px solid ${opt.color}`,
+                                    background: selected ? opt.color : "transparent",
+                                    color: selected ? "white" : opt.color,
+                                  }}
+                                >
+                                  {selected && <Check size={16} />}
+                                  {opt.label}
+                                </button>
+                              );
+                            })}
+                          </div>
+                          <p style={{ fontSize: "0.6875rem", color: C.inkMuted, marginTop: "0.5rem" }}>
+                            {teamResult
+                              ? "Allir í sigurliðinu fá 1 stig í tölfræðinni. Ýttu aftur á valið til að afskrá."
+                              : "Allir í sigurliðinu fá 1 stig í tölfræðinni."}
+                          </p>
+                        </>
+                      ) : (
+                        <p style={{ fontSize: "0.75rem", color: C.inkMuted }}>Hægt verður að skrá sigurlið þegar æfingin er hafin.</p>
+                      )}
                     </div>
                   </div>
                 )}
@@ -962,7 +1037,7 @@ export default function App() {
           <div style={{ marginTop: "0.5rem" }}>
             <div style={{ ...cardStyle, overflow: "hidden" }}>
               <div style={{ display: "grid", gridTemplateColumns: "1.6fr 0.8fr 0.8fr 0.8fr", padding: "0.75rem 1rem", background: C.tan, fontSize: "0.6875rem", fontWeight: 600, textTransform: "uppercase", color: C.inkMuted }}>
-                <span>Nafn</span><span style={{ textAlign: "center" }}>Mæt.</span><span style={{ textAlign: "center" }}>Mörk</span><span style={{ textAlign: "center" }}>Sigrar</span>
+                <span>Nafn</span><span style={{ textAlign: "center" }}>Mæt.</span><span style={{ textAlign: "center" }}>Mörk</span><span style={{ textAlign: "center" }}>Stig</span>
               </div>
               {[...players].sort((a, b) => attendanceCount(b.id) - attendanceCount(a.id)).map((p, i) => (
                 <div key={p.id} style={{ display: "grid", gridTemplateColumns: "1.6fr 0.8fr 0.8fr 0.8fr", padding: "0.625rem 1rem", borderBottom: i !== players.length - 1 ? `1px solid ${C.divider}` : "none", alignItems: "center" }}>
@@ -1357,6 +1432,22 @@ export default function App() {
 
             <div style={cardStyle}>
               <div style={{ padding: "1rem" }}>
+                <div className="display-font" style={{ fontSize: "0.875rem", fontWeight: 600, textTransform: "uppercase", color: C.ink, marginBottom: "0.75rem" }}>Markaskorarar</div>
+                <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", fontSize: "0.8125rem", color: C.ink, cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={settings.allowGoals !== false}
+                    onChange={(e) => saveSettings({ ...settings, allowGoals: e.target.checked })}
+                    style={{ width: "1.125rem", height: "1.125rem" }}
+                  />
+                  Leyfa skráningu marka á æfingum
+                </label>
+                <p style={{ fontSize: "0.6875rem", color: C.inkMuted, marginTop: "0.5rem" }}>Þegar slökkt er á þessu birtist ekki reiturinn "Markaskorarar" undir æfingum. Mörk sem þegar eru skráð haldast í tölfræðinni.</p>
+              </div>
+            </div>
+
+            <div style={cardStyle}>
+              <div style={{ padding: "1rem" }}>
                 <div className="display-font" style={{ fontSize: "0.875rem", fontWeight: 600, textTransform: "uppercase", color: C.ink, marginBottom: "0.75rem" }}>PIN-númer þjálfara</div>
                 <input
                   type="text"
@@ -1375,15 +1466,18 @@ export default function App() {
   );
 }
 
-function TeamCard({ title, bg, team }) {
+function TeamCard({ title, bg, team, isWinner }) {
   return (
-    <div style={{ background: bg, borderRadius: "0.875rem", padding: "0.75rem", minHeight: 120 }}>
-      <div className="display-font" style={{ fontSize: "0.8125rem", fontWeight: 700, textTransform: "uppercase", color: "#16211B", marginBottom: "0.5rem" }}>{title}</div>
+    <div style={{ background: bg, borderRadius: "0.875rem", padding: "0.75rem", minHeight: 120, color: "#fff", boxShadow: isWinner ? `0 0 0 3px ${C.gold}` : "none" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "0.5rem" }}>
+        <div className="display-font" style={{ fontSize: "0.9375rem", fontWeight: 700, textTransform: "uppercase", color: "#fff" }}>{title}</div>
+        {isWinner && <Trophy size={16} color={C.gold} fill={C.gold} />}
+      </div>
       <div style={{ display: "flex", flexDirection: "column", gap: "0.3rem" }}>
         {team.map((p) => (
           <div key={p.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-            <span style={{ fontSize: "0.75rem", color: "#16211B" }}>{p.name}</span>
-            <span style={{ fontSize: "0.625rem", fontWeight: 700, color: "#16211B", background: "rgba(255,255,255,0.55)", padding: "0.1rem 0.4rem", borderRadius: "0.25rem" }}>{p.position}</span>
+            <span style={{ fontSize: "0.75rem", color: "#fff" }}>{p.name}</span>
+            <span style={{ fontSize: "0.625rem", fontWeight: 700, color: "#fff", background: "rgba(255,255,255,0.25)", padding: "0.1rem 0.4rem", borderRadius: "0.25rem" }}>{p.position}</span>
           </div>
         ))}
       </div>
