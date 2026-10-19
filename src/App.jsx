@@ -258,14 +258,24 @@ export default function App() {
 
   const practiceDates = useMemo(() => getPracticeDates(settings), [settings]);
 
-  const upcoming = useMemo(() => {
+  // Listinn inniheldur allar liðnar æfingar auk næstu 10, svo hægt sé að fletta aftur í tímann.
+  // nextIdx er staðsetning næstu æfingar í listanum (sjálfgefið valin).
+  const { upcoming, nextIdx } = useMemo(() => {
     const now = new Date();
     const idx = practiceDates.findIndex((d) => practiceDateTime(d, settings.time) >= now - 1000 * 60 * 60 * 6);
     const startIdx = idx === -1 ? Math.max(0, practiceDates.length - 1) : idx;
-    return practiceDates.slice(startIdx, startIdx + 10);
+    return { upcoming: practiceDates.slice(0, startIdx + 10), nextIdx: startIdx };
   }, [practiceDates, settings.time]);
 
-  useEffect(() => { setSelectedIdx(0); }, [upcoming.length]);
+  useEffect(() => { setSelectedIdx(nextIdx); }, [upcoming.length, nextIdx]);
+
+  // Haltu völdu dagsetningunni sýnilegri í dagsetningarrenningnum.
+  useEffect(() => {
+    const d = upcoming[selectedIdx];
+    if (!d) return;
+    const el = document.getElementById(`chip-${d}`);
+    if (el && el.scrollIntoView) el.scrollIntoView({ behavior: "smooth", inline: "center", block: "nearest" });
+  }, [selectedIdx, upcoming, tab, loaded]);
 
   useEffect(() => {
     if (financePeriodId || periods.length === 0) return;
@@ -710,10 +720,12 @@ export default function App() {
                     {upcoming.map((d, i) => (
                       <button
                         key={d}
+                        id={`chip-${d}`}
                         onClick={() => setSelectedIdx(i)}
                         style={{
                           flexShrink: 0, padding: "0.375rem 0.75rem", borderRadius: "9999px", fontSize: "0.75rem",
                           fontWeight: 500, border: "none",
+                          opacity: i < nextIdx && i !== selectedIdx ? 0.65 : 1,
                           textDecoration: cancelled[d] ? "line-through" : "none",
                           background: i === selectedIdx ? C.gold : C.navBg,
                           color: i === selectedIdx ? C.ink : (cancelled[d] ? "#4E7A5E" : C.textMuted),
